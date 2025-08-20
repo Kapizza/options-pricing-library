@@ -1,4 +1,3 @@
-# tests/test_monte_carlo.py
 import numpy as np
 from options_pricing.monte_carlo import monte_carlo_option_pricing
 from options_pricing.black_scholes import black_scholes_price

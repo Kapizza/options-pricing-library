@@ -1,6 +1,5 @@
 # options-pricing-library/tests/test_binomial_tree.py
 
-import pytest
 from options_pricing.binomial_tree import binomial_tree
 from options_pricing.black_scholes import black_scholes_price
 
