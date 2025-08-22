@@ -9,3 +9,5 @@ ENV/
 env/
 env.bak/
 venv.bak/
+
+options_pricing/Option_Analysis.ipynb

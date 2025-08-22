@@ -1,7 +1,7 @@
 # monte_carlo.py
 import numpy as np
 
-def monte_carlo_option_pricing(S0, K, T, r, sigma, option_type="call", n_simulations=100000, seed=None):
+def monte_carlo_option_price(S0, K, T, r, sigma, option_type="call", n_simulations=100000, seed=None):
     """
     Monte Carlo option pricing for European options under the Black-Scholes model.
 
@@ -52,5 +52,5 @@ def monte_carlo_option_pricing(S0, K, T, r, sigma, option_type="call", n_simulat
 if __name__ == "__main__":
     # Quick demo
     S0, K, T, r, sigma = 100, 100, 1, 0.05, 0.2
-    print("Monte Carlo Call:", monte_carlo_option_pricing(S0, K, T, r, sigma, "call", seed=42))
-    print("Monte Carlo Put :", monte_carlo_option_pricing(S0, K, T, r, sigma, "put", seed=42))
+    print("Monte Carlo Call:", monte_carlo_option_price(S0, K, T, r, sigma, "call", seed=42))
+    print("Monte Carlo Put :", monte_carlo_option_price(S0, K, T, r, sigma, "put", seed=42))
