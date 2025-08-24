@@ -13,3 +13,6 @@ venv.bak/
 
 notebooks/Option_Analysis.ipynb
 notebooks/*.csv
+notebooks/Option_Analysis.ipynb
+
+options_pricing/Option_Analysis.ipynb
