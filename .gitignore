@@ -10,4 +10,6 @@ env/
 env.bak/
 venv.bak/
 
-options_pricing/Option_Analysis.ipynb
+
+notebooks/Option_Analysis.ipynb
+notebooks/*.csv
