@@ -14,5 +14,5 @@ venv.bak/
 notebooks/Option_Analysis.ipynb
 notebooks/*.csv
 notebooks/Option_Analysis.ipynb
-
-options_pricing/Option_Analysis.ipynb
+options-pricing-library/notebooks/*.csv
+options-pricing-library/notebooks/Option_Analysis.ipynb
