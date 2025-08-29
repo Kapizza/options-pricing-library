@@ -9,7 +9,7 @@ For detailed explanations of the fundamental theories used in this package — i
 
 **[`notebooks/00_Theory-CLT-ITO-BS.ipynb`](notebooks/00_Theory-CLT-ITO-BS.ipynb)**
 
-## Features
+## Package features
 - **Closed-form models**: Black–Scholes (European options), Greeks
 - **Discrete-time models**: Binomial & trinomial trees
 - **Monte Carlo simulation**: Path-dependent options (Asian, Barrier, Lookback)
