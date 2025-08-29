@@ -5,7 +5,7 @@ A Python library for **derivatives pricing and risk management**, implementing c
 ---
 ## Theory Reference
 
-For detailed explanations of the fundamental theories used in this package — including the **Central Limit Theorem (CLT)**, **Brownian Motion**, **Itô’s Lemma**, and the **Black–Scholes Model** — please refer to the Jupyter notebook:
+For detailed explanations of the fundamental theories used in this package, including the **Central Limit Theorem (CLT)**, **Brownian Motion**, **Itô’s Lemma**, and the **Black–Scholes Model**:
 
 **[`notebooks/00_Theory-CLT-ITO-BS.ipynb`](notebooks/00_Theory-CLT-ITO-BS.ipynb)**
 
