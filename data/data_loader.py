@@ -14,3 +14,20 @@ def compute_annualized_volatility(stock_data):
 def get_latest_price(stock_data):
     return float(stock_data['Close'].values[-1])
 
+def fetch_current_chain(ticker):
+    yf_t = yf.Ticker(ticker)
+    expiries = yf_t.options
+    rows = []
+    for ex in expiries:
+        chain = yf_t.option_chain(ex)
+        for side, df in (("call", chain.calls), ("put", chain.puts)):
+            if df is None or df.empty: 
+                continue
+            for _, row in df.iterrows():
+                # mid price (skip junk)
+                if pd.isna(row.get("lastPrice")): 
+                    continue
+                bid = row.get("bid", np.nan); ask = row.get("ask", np.nan)
+                mid = np.nanmean([bid, ask]) if np.isfinite(bid) and np.isfinite(ask) else row["lastPrice"]
+                rows.append({"expiration": pd.to_datetime(ex), "strike": float(row["strike"]), "type": side, "mid": float(mid)})
+    return pd.DataFrame(rows).dropna()
