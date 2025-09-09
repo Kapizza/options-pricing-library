@@ -1,4 +1,3 @@
-# options_pricing/risk.py
 import math
 import numpy as np
 import pandas as pd

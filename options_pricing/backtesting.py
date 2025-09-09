@@ -4,7 +4,7 @@
 
 import numpy as np
 import pandas as pd
-from options_pricing.black_scholes import black_scholes_price
+from src.black_scholes import black_scholes_price
 
 
 # --- utilities ---------------------------------------------------------------------------

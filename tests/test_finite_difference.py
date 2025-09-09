@@ -1,6 +1,6 @@
 import numpy as np
-from options_pricing.finite_difference import finite_difference
-from options_pricing.black_scholes import black_scholes_price
+from src.finite_difference import finite_difference
+from src.black_scholes import black_scholes_price
 
 def test_fd_matches_bs_call_cn():
     S0, K, T, r, sigma = 100, 100, 1.0, 0.05, 0.2

@@ -1,5 +1,3 @@
-# options_pricing/strategies.py
-
 import numpy as np
 from .black_scholes import black_scholes_price
 
@@ -42,7 +40,7 @@ def bear_put_spread(S, K1, K2, T, r, sigma):
     return long_put(S, K1, T, r, sigma) + short_put(S, K2, T, r, sigma)
 
 
-def butterfly_spread(S, K1, K2, K3, r, T, sigma):
+def butterfly_spread(S, K1, K2, K3, T, r, sigma):
     """
     Computes the price of a butterfly spread using European calls.
 

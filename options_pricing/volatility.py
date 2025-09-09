@@ -1,5 +1,3 @@
-# options_pricing/volatility.py
-
 import numpy as np
 from scipy.optimize import brentq
 from .black_scholes import black_scholes_price

@@ -3,12 +3,12 @@
 import numpy as np
 import pytest
 
-from options_pricing.strategies import (
+from src.strategies import (
     long_call, short_call, long_put, short_put,
     bull_call_spread, bear_put_spread,
     straddle, strangle, collar, payoff_diagram, butterfly_spread
 )
-from options_pricing.black_scholes import black_scholes_price
+from src.black_scholes import black_scholes_price
 
 # Common test parameters
 S = 100   # spot price

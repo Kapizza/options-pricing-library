@@ -1,5 +1,3 @@
-# options_pricing/binomial_tree.py
-
 import numpy as np
 
 def binomial_tree(S, K, T, r, sigma, steps=100, option_type="call", american=False):

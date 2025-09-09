@@ -1,6 +1,6 @@
 import numpy as np
-from options_pricing.monte_carlo import monte_carlo_option_price
-from options_pricing.black_scholes import black_scholes_price
+from src.monte_carlo import monte_carlo_option_price
+from src.black_scholes import black_scholes_price
 
 def test_monte_carlo_call_close_to_bs():
     S0, K, T, r, sigma = 100, 100, 1, 0.05, 0.2

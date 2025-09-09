@@ -1,7 +1,7 @@
 # options-pricing-library/tests/test_binomial_tree.py
 
-from options_pricing.binomial_tree import binomial_tree
-from options_pricing.black_scholes import black_scholes_price
+from src.binomial_tree import binomial_tree
+from src.black_scholes import black_scholes_price
 
 def test_binomial_vs_black_scholes_call():
     S, K, T, r, sigma = 100, 100, 1, 0.05, 0.2

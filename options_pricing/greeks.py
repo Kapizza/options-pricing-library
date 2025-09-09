@@ -1,4 +1,3 @@
-# options_pricing/greeks.py
 import numpy as np
 from scipy.stats import norm
 from .black_scholes import bs_d1_d2

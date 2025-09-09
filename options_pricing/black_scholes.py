@@ -1,4 +1,3 @@
-# options_pricing/black_scholes.py
 import numpy as np
 from scipy.stats import norm
 import math

@@ -2,7 +2,7 @@ import math
 import numpy as np
 import pytest
 
-from options_pricing import risk
+from src import risk
 
 
 @pytest.fixture

@@ -2,8 +2,8 @@
 
 import numpy as np
 import pytest
-from options_pricing.volatility import implied_volatility, implied_vol_surface
-from options_pricing.black_scholes import black_scholes_price
+from src.volatility import implied_volatility, implied_vol_surface
+from src.black_scholes import black_scholes_price
 
 
 @pytest.mark.parametrize("sigma_true, option_type", [

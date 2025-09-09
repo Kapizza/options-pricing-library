@@ -1,5 +1,5 @@
 import numpy as np
-from options_pricing.greeks import delta, gamma, vega, theta, rho
+from src.greeks import delta, gamma, vega, theta, rho
 
 def test_delta_call_put():
     S, K, T, r, sigma = 100, 100, 1, 0.05, 0.2
