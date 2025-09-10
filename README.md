@@ -1,4 +1,4 @@
-# 📈 Options Pricing Library
+# Options Pricing Library
 
 A **Python library for option pricing, Greeks, strategies, volatility modeling, risk management, and backtesting**, with clean implementations of classic models and a full suite of demo notebooks.  
 
@@ -13,7 +13,7 @@ For detailed explanations of the fundamental theories used in this package, incl
 
 ---
 
-## 🚀 Features
+##  Features
 
 - **Core Pricing Models**
   - Black–Scholes closed form
