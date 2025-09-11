@@ -64,17 +64,16 @@ def butterfly_spread(S, K1, K2, K3, T, r, sigma):
     float
         Price of the butterfly spread
     """
-    # Long 1 call at K1
-    c1 = black_scholes_price(S, K1, T, r, sigma, option_type="call")
-    # Short 2 calls at K2
-    c2 = 2 * black_scholes_price(S, K2, T, r, sigma, option_type="call")
-    # Long 1 call at K3
-    c3 = black_scholes_price(S, K3, T, r, sigma, option_type="call")
+def butterfly_spread(S, K1, K2, K3, r, T, sigma):
+    # optional: sanity checks
+    # if not (K1 < K2 < K3 and (K2 - K1) == (K3 - K2)):
+    #     raise ValueError("Butterfly requires K1<K2<K3 with equal spacing.")
 
+    c1 = black_scholes_price(S=S, K=K1, T=T, r=r, sigma=sigma, option_type="call")
+    c2 = black_scholes_price(S=S, K=K2, T=T, r=r, sigma=sigma, option_type="call")
+    c3 = black_scholes_price(S=S, K=K3, T=T, r=r, sigma=sigma, option_type="call")
     # Butterfly spread price
-    butterfly_price = c1 - c2 + c3
-    return butterfly_price  
-
+    return c1 - 2.0 * c2 + c3
 
 
 # --------------------

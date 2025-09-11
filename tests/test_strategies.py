@@ -115,7 +115,7 @@ def test_butterfly_spread_value():
     price = butterfly_spread(S, K1, K2, K3, r, T, sigma)
 
     # Use the same call_price function for expected value
-    expected_price = black_scholes_price(S, K1, T, r, sigma, option_type="call") - 2 * black_scholes_price(S, K2, T, r, sigma, option_type="call") + black_scholes_price(S, K3, T, r, sigma, option_type="call")
+    expected_price = black_scholes_price(S=S, K=K1, T=T, r=r, sigma=sigma, option_type="call") - 2 * black_scholes_price(S=S, K=K2, T=T, r=r, sigma=sigma, option_type="call") + black_scholes_price(S=S, K=K3, T=T, r=r, sigma=sigma, option_type="call")
 
 
     assert abs(price - expected_price) < 1e-12
