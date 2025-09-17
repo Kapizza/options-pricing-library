@@ -14,7 +14,7 @@ For detailed explanations of the fundamental theories used in this package, incl
 
 ---
 
-## ✨ Features
+## Features
 
 - **Core Pricing Models**
   - Black–Scholes closed form
