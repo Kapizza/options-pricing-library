@@ -99,6 +99,31 @@ def _numeric_convex(wk, k, tol=-1e-8):
 
 
 # -------------------------- Per-expiry SVI calibration ------------------------
+def _convexify_row_in_k(k_grid, w_row):
+    """
+    Project a 1D curve w(k) onto the convex cone by
+    isotonic regression on its discrete slopes, then integrate back.
+    Works for non-uniform k spacing.
+    """
+    k = np.asarray(k_grid, float)
+    w = np.asarray(w_row, float)
+    dk = np.diff(k)
+    s  = np.diff(w) / np.maximum(dk, 1e-12)  # discrete slopes
+
+    # Enforce non-decreasing slopes via isotonic regression
+    ir = IsotonicRegression(increasing=True, out_of_bounds="clip")
+    # x positions don't matter for isotonic; use segment midpoints
+    x_mid = 0.5 * (k[:-1] + k[1:])
+    s_hat = ir.fit_transform(x_mid, s)
+
+    # Integrate slopes back to a convex ŵ
+    w_hat = np.empty_like(w)
+    w_hat[0] = w[0]
+    w_hat[1:] = w_hat[0] + np.cumsum(s_hat * dk)
+
+    # Keep total variance non-negative
+    return np.maximum(w_hat, 0.0)
+
 
 def _huber(res, delta):
     """Huber loss (elementwise)."""
@@ -302,44 +327,43 @@ class SVISurface:
 
 def stitch_no_arb_calendar(tenors, fitted_params, k_grid):
     """
-    Enforce calendar no-arbitrage by projecting variance-per-time (w/T) to be
-    non-decreasing in T at each k on a fixed k_grid.
-
-    Inputs
-    ------
-    tenors        : array-like of maturities T (shape M,)
-    fitted_params : list of SVIParams of length M
-    k_grid        : array-like grid of log-moneyness values
-
-    Returns
-    -------
-    SVISurface
+    Enforce calendar no-arbitrage by projecting total variance w(k, T)
+    to be non-decreasing in T at each k on a fixed k_grid,
+    then repair convexity in k (butterfly no-arb) per tenor.
     """
     tenors = np.asarray(tenors, dtype=float)
     k_grid = np.asarray(k_grid, dtype=float)
 
     M = tenors.size
-    W = np.zeros((M, k_grid.size), dtype=float)
+    # raw w from per-expiry fits
+    Wtot = np.zeros((M, k_grid.size), dtype=float)
     for i, (T, p) in enumerate(zip(tenors, fitted_params)):
-        w_row = svi_total_variance(k_grid, p)
-        W[i, :] = w_row / max(T, 1e-8)
+        Wtot[i, :] = svi_total_variance(k_grid, p)
 
-    # Sort by tenor and apply isotonic regression per k to enforce monotonicity
+    # sort by T, project monotone-in-T per k
     idx = np.argsort(tenors)
     T_sorted = tenors[idx]
-    W_sorted = W[idx]
+    W_sorted = Wtot[idx]
 
-    ir = IsotonicRegression(increasing=True, out_of_bounds="clip")
+    irT = IsotonicRegression(increasing=True, out_of_bounds="clip")
     for j in range(k_grid.size):
-        W_sorted[:, j] = ir.fit_transform(T_sorted, W_sorted[:, j])
+        W_sorted[:, j] = irT.fit_transform(T_sorted, W_sorted[:, j])
 
-    # Unsort back
-    W_iso = np.zeros_like(W)
-    W_iso[idx] = W_sorted
+    # unsort
+    W_mono = np.zeros_like(Wtot)
+    W_mono[idx] = W_sorted
 
-    # Back to total variance
-    Wtot = W_iso * tenors.reshape(-1, 1)
-    return SVISurface(tenors=tenors.copy(), params=list(fitted_params), k_grid=k_grid.copy(), w_grid=Wtot)
+    # --- NEW: convexity repair in k per tenor ---
+    for i in range(M):
+        W_mono[i, :] = _convexify_row_in_k(k_grid, W_mono[i, :])
+
+    return SVISurface(
+        tenors=tenors.copy(),
+        params=list(fitted_params),
+        k_grid=k_grid.copy(),
+        w_grid=W_mono,
+    )
+
 
 
 # ------------------------------- High-level entry -----------------------------

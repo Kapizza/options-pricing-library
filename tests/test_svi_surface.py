@@ -82,13 +82,12 @@ def test_calendar_no_arb_and_nonnegative_variance(tenors):
 
     # Pick a few k locations and check calendar monotonicity of w/T
     for kval in [-0.4, 0.0, 0.3]:
-        w_over_T = []
+        w_vals = []
         for T in tenors:
-            F = S0 * math.exp((r - q) * T)
-            w = (surf.iv([kval], T) ** 2) * T
-            w_over_T.append(float(w.item() / T))
-        w_over_T = np.array(w_over_T)
-        assert np.all(np.diff(w_over_T) >= -1e-6)  # non-decreasing (allow tiny num noise)
+            w = (surf.iv(np.array([kval]), T).item() ** 2) * T
+            w_vals.append(w)
+        w_vals = np.array(w_vals)
+        assert np.all(np.diff(w_vals) >= -1e-6)  # non-decreasing w w.r.t. T
 
     # Nonnegative variance and numeric convexity along a grid
     Kgrid = np.linspace(60, 140, 61)
@@ -165,5 +164,5 @@ def test_short_maturity_stability_and_monotonicity():
 
     # Check calendar monotonicity at ATM-ish k=0
     k0 = np.array([0.0])
-    vals = np.array([(surf.iv(k0, T)[0] ** 2) for T in tenors])
+    vals = np.array([(surf.iv(k0, T)[0] ** 2) * T for T in tenors])
     assert np.all(np.diff(vals) >= -1e-6)
