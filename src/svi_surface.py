@@ -27,7 +27,7 @@ from scipy.optimize import minimize, Bounds
 from scipy.interpolate import interp1d
 from sklearn.isotonic import IsotonicRegression
 
-# Use your existing BS helpers (IV inversion) from black_scholes.py
+# Use the existing BS helpers (IV inversion) from black_scholes.py
 from src.black_scholes import implied_vol_from_price  # robust Brent + Newton
 
 

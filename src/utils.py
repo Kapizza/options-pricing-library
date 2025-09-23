@@ -48,7 +48,7 @@ def make_roll_calendar(index, schedule="monthly", weekday=0):
         weekday = int(weekday)
         if not (0 <= weekday <= 6):
             raise ValueError("weekday must be in [0..6]; 0=Mon, 6=Sun")
-        # If your index only contains trading days, this keeps the chosen weekday trading sessions
+        # If an index only contains trading days, this keeps the chosen weekday trading sessions
         mask = index.weekday == weekday
         return pd.DatetimeIndex(index[mask])
 
