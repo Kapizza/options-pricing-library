@@ -167,3 +167,27 @@ def implied_vol_from_price(S, K, T, r, price, option_type="call", tol=1e-8):
             break
 
     return float(iv)
+
+
+
+def bs_delta_call(S, K, T, r, q, sigma):
+    """
+    Black–Scholes delta for a European call. Put-delta = call-delta - exp(-qT).
+    """
+    if T <= 0 or sigma <= 0:
+        return 1.0 if S > K else 0.0
+    F = S * math.exp((r - q) * T)
+    volT = sigma * math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * volT * volT) / volT
+    Phi = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+    return math.exp(-q * T) * Phi
+
+def iv_from_surface(surf, S, K, T, r, q):
+    """
+    Query IV from SVI surface using log-moneyness k=ln(K/F_T).
+    """
+    if T <= 0:
+        return np.nan
+    F = S * np.exp((r - q) * T)
+    k = np.log(K / F)
+    return surf.iv(np.array([k]), T).item()
