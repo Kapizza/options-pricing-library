@@ -4,12 +4,12 @@ from scipy.optimize import brentq
 import math
 
 # --------------------------------------------------------------------------------------
-# Core Black–Scholes
+# Core Black–Scholes (Merton model with continuous dividend yield q)
 # --------------------------------------------------------------------------------------
 
-def black_scholes_price(S, K, T, r, sigma, option_type="call"):
+def black_scholes_price(S, K, T, r, sigma, option_type="call", q=0.0):
     """
-    Black–Scholes price for European calls/puts on a non-dividend-paying asset.
+    Black–Scholes–Merton price for European calls/puts with continuous dividend yield q.
 
     Parameters
     ----------
@@ -20,11 +20,13 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call"):
     T : float
         Time to maturity (in years)
     r : float
-        Continuously compounded risk-free rate
+        Risk-free rate (cont. comp.)
     sigma : float
         Volatility (annualized)
     option_type : str
         "call" or "put"
+    q : float, default 0.0
+        Continuous dividend yield
 
     Returns
     -------
@@ -32,47 +34,53 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call"):
         Option price
     """
     if T <= 0:
-        intrinsic = S - K if option_type.lower() == "call" else K - S
+        intrinsic = (S - K) if option_type.lower() == "call" else (K - S)
         return float(max(intrinsic, 0.0))
 
-    d = bs_d1_d2(S, K, T, r, sigma)
+    d = bs_d1_d2(S, K, T, r, sigma, q=q)
     d1, d2 = d["d1"], d["d2"]
-    DF = math.exp(-r * T)
+    disc_r = math.exp(-r * T)
+    disc_q = math.exp(-q * T)
 
     if option_type.lower() == "call":
-        return float(S * norm.cdf(d1) - K * DF * norm.cdf(d2))
+        return float(disc_q * S * norm.cdf(d1) - K * disc_r * norm.cdf(d2))
     elif option_type.lower() == "put":
-        return float(K * DF * norm.cdf(-d2) - S * norm.cdf(-d1))
+        return float(K * disc_r * norm.cdf(-d2) - disc_q * S * norm.cdf(-d1))
     else:
         raise ValueError("option_type must be 'call' or 'put'")
 
 
-def bs_d1_d2(S, K, T, r, sigma):
+def bs_d1_d2(S, K, T, r, sigma, q=0.0):
     """
-    Compute d1 and d2 for Black–Scholes.
-    Returns a dict: {"d1": ..., "d2": ...}
+    Vectorized d1 and d2 for Black–Scholes–Merton with dividend yield q.
+    Accepts scalars or numpy arrays (broadcasted).
+    Returns dict: {"d1": ndarray, "d2": ndarray}
     """
-    eps = 1e-12
-    S = max(float(S), eps)
-    K = max(float(K), eps)
-    T = max(float(T), eps)
-    sigma = max(float(sigma), eps)
+    S = np.asarray(S, dtype=float)
+    K = np.asarray(K, dtype=float)
+    T = np.asarray(T, dtype=float)
+    r = np.asarray(r, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    q = np.asarray(q, dtype=float)
 
-    sqrtT = math.sqrt(T)
-    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT
+    eps = 1e-12
+    S_ = np.maximum(S, eps)
+    K_ = np.maximum(K, eps)
+    T_ = np.maximum(T, eps)
+    sig_ = np.maximum(sigma, eps)
+
+    sqrtT = np.sqrt(T_)
+    d1 = (np.log(S_ / K_) + (r - q + 0.5 * sig_ * sig_) * T_) / (sig_ * sqrtT)
+    d2 = d1 - sig_ * sqrtT
     return {"d1": d1, "d2": d2}
 
+
 # --------------------------------------------------------------------------------------
-# Forward-measure helpers (useful for SABR and forward-based workflows)
+# Forward-measure helpers (compatible with q)
 # --------------------------------------------------------------------------------------
 
 def bs_call_forward(F, K, T, iv):
-    """
-    Black–Scholes call price in *forward measure* (undiscounted).
-    Returns E^{Q^T}[(S_T - K)^+] when F = E^{Q^T}[S_T].
-    Final discounted call price = DF * bs_call_forward(F, K, T, iv) with DF = e^{-rT}.
-    """
+    """Forward-measure Black–Scholes call (undiscounted)."""
     if T <= 0:
         return max(F - K, 0.0)
     if iv <= 0 or K <= 0 or F <= 0:
@@ -84,108 +92,78 @@ def bs_call_forward(F, K, T, iv):
 
 
 def bs_put_forward(F, K, T, iv):
-    """
-    Black–Scholes put price in *forward measure* (undiscounted).
-    Using parity in forward measure: P = C - (F - K).
-    """
+    """Forward-measure put (undiscounted)."""
     return float(bs_call_forward(F, K, T, iv) - (F - K))
 
 
 def black_scholes_price_from_forward(F, DF, K, T, iv, option_type="call"):
-    """
-    Convenience wrapper: BS price when you already have forward F and discount factor DF.
-    """
+    """Price when you already have forward F and discount factor DF."""
     undisc = bs_call_forward(F, K, T, iv) if option_type.lower() == "call" else bs_put_forward(F, K, T, iv)
     return float(DF * undisc)
 
 # --------------------------------------------------------------------------------------
-# Implied volatility (robust) — Brent bracket + Newton polish
+# Implied volatility solver (with q support)
 # --------------------------------------------------------------------------------------
 
-def implied_vol_from_price(S, K, T, r, price, option_type="call", tol=1e-8):
+def implied_vol_from_price(S, K, T, r, price, option_type="call", q=0.0, tol=1e-8):
     """
-    Black–Scholes implied volatility from a given price.
-    Robust: tries Brent in a wide bracket [1e-6, 5.0]; falls back to Newton if not bracketed.
-
-    Parameters
-    ----------
-    S, K, T, r : floats
-    price : float
-        Observed option price
-    option_type : "call" | "put"
-    tol : float
-        Solver tolerances
-
-    Returns
-    -------
-    float
-        Implied volatility (annualized). np.nan if not solvable.
+    Implied volatility from price using Black–Scholes–Merton with q.
+    Uses Brent root-finding + Newton fallback.
     """
-    S = float(S); K = float(K); T = float(T); r = float(r); price = float(price)
+    S, K, T, r, price = map(float, (S, K, T, r, price))
 
-    # Guard rails
     if T <= 0 or S <= 0 or K <= 0 or price <= 0:
         return np.nan
 
-    DF = math.exp(-r * T)
-    discK = K * DF
-    intrinsic = (S - discK) if option_type.lower() == "call" else (discK - S)
-    intrinsic = max(0.0, intrinsic)
+    disc_r = math.exp(-r * T)
+    disc_q = math.exp(-q * T)
+    F = S * disc_q / disc_r
 
-    # If below intrinsic, nudge up a hair
+    intrinsic = (S - K) if option_type.lower() == "call" else (K - S)
+    intrinsic = max(0.0, intrinsic)
     if price < intrinsic:
         price = intrinsic + 1e-12
 
-    # Root function for Brent
     def f(sig):
-        return black_scholes_price(S, K, T, r, sig, option_type=option_type) - price
+        return black_scholes_price(S, K, T, r, sig, option_type=option_type, q=q) - price
 
     lo, hi = 1e-6, 5.0
     flo, fhi = f(lo), f(hi)
 
-    # Brent if bracketed
     if np.isfinite(flo) and np.isfinite(fhi) and flo * fhi < 0:
         try:
             return float(brentq(f, lo, hi, xtol=tol, rtol=tol, maxiter=200))
         except Exception:
-            pass  # fall through to Newton
+            pass
 
-    # Newton fallback
     iv = 0.2
     for _ in range(20):
-        d = bs_d1_d2(S, K, T, r, iv)
+        d = bs_d1_d2(S, K, T, r, iv, q=q)
         d1 = d["d1"]
-        # Vega in spot measure
-        vega = S * norm.pdf(d1) * math.sqrt(T)
+        vega = S * math.exp(-q * T) * norm.pdf(d1) * math.sqrt(T)
         if vega < 1e-12:
             break
-        px = black_scholes_price(S, K, T, r, iv, option_type=option_type)
+        px = black_scholes_price(S, K, T, r, iv, option_type=option_type, q=q)
         iv -= (px - price) / vega
-        if iv <= 1e-6: iv = 1e-6
-        if iv >= 5.0:  iv = 5.0
+        iv = min(max(iv, 1e-6), 5.0)
         if abs(px - price) < max(1e-10, tol * price):
             break
 
     return float(iv)
 
-
+# --------------------------------------------------------------------------------------
+# Delta helper (kept for compatibility with your notebooks)
+# --------------------------------------------------------------------------------------
 
 def bs_delta_call(S, K, T, r, q, sigma):
-    """
-    Black–Scholes delta for a European call. Put-delta = call-delta - exp(-qT).
-    """
+    """Black–Scholes–Merton call delta with dividend yield q."""
     if T <= 0 or sigma <= 0:
         return 1.0 if S > K else 0.0
-    F = S * math.exp((r - q) * T)
-    volT = sigma * math.sqrt(T)
-    d1 = (math.log(F / K) + 0.5 * volT * volT) / volT
-    Phi = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-    return math.exp(-q * T) * Phi
+    d1 = bs_d1_d2(S, K, T, r, sigma, q=q)["d1"]
+    return math.exp(-q * T) * norm.cdf(d1)
 
 def iv_from_surface(surf, S, K, T, r, q):
-    """
-    Query IV from SVI surface using log-moneyness k=ln(K/F_T).
-    """
+    """Query IV from SVI surface using log-moneyness k=ln(K/F_T)."""
     if T <= 0:
         return np.nan
     F = S * np.exp((r - q) * T)
