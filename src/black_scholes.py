@@ -13,41 +13,73 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call", q=0.0):
 
     Parameters
     ----------
-    S : float
-        Spot price
-    K : float
-        Strike
-    T : float
-        Time to maturity (in years)
-    r : float
-        Risk-free rate (cont. comp.)
-    sigma : float
-        Volatility (annualized)
+    S : float or ndarray
+        Spot price.
+    K : float or ndarray
+        Strike.
+    T : float or ndarray
+        Time to maturity (in years).
+    r : float or ndarray
+        Risk-free rate (cont. comp.).
+    sigma : float or ndarray
+        Volatility (annualized).
     option_type : str
-        "call" or "put"
-    q : float, default 0.0
-        Continuous dividend yield
+        "call" or "put".
+    q : float or ndarray, default 0.0
+        Continuous dividend yield.
 
     Returns
     -------
-    float
-        Option price
+    float or ndarray
+        Option price. Returns a scalar if all inputs are scalars; otherwise an array.
     """
-    if T <= 0:
-        intrinsic = (S - K) if option_type.lower() == "call" else (K - S)
-        return float(max(intrinsic, 0.0))
+    # --- 1) Convert to numpy arrays to allow broadcasting & vectorization.
+    S     = np.asarray(S,     dtype=float)
+    K     = np.asarray(K,     dtype=float)
+    T     = np.asarray(T,     dtype=float)
+    r     = np.asarray(r,     dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    q     = np.asarray(q,     dtype=float)
 
-    d = bs_d1_d2(S, K, T, r, sigma, q=q)
+    # --- 2) Handle expired contracts elementwise.
+    # If T <= 0, the option value is its intrinsic value; we compute it below.
+    is_expired = (T <= 0.0)
+    intrinsic_call = np.maximum(S - K, 0.0)
+    intrinsic_put  = np.maximum(K - S, 0.0)
+
+    # --- 3) Guard against numerical issues in d1/d2 (floors on S, K, T, sigma).
+    # We make "positive" versions used for d1/d2 and discount factors.
+    eps   = 1e-12
+    S_pos = np.maximum(S, eps)
+    K_pos = np.maximum(K, eps)
+    T_pos = np.maximum(T, eps)
+    sig_p = np.maximum(sigma, eps)
+
+    # --- 4) Discount factors for rate r and dividend yield q.
+    disc_r = np.exp(-r * T_pos)
+    disc_q = np.exp(-q * T_pos)
+
+    # --- 5) Compute d1 and d2 (vectorized). We pass the guarded parameters.
+    d = bs_d1_d2(S_pos, K_pos, T_pos, r, sig_p, q=q)
     d1, d2 = d["d1"], d["d2"]
-    disc_r = math.exp(-r * T)
-    disc_q = math.exp(-q * T)
 
+    # --- 6) Black–Scholes–Merton formula (spot measure).
+    # Call: C = e^{-qT} S N(d1) - K e^{-rT} N(d2)
+    # Put : P = K e^{-rT} N(-d2) - e^{-qT} S N(-d1)
+    call_val = disc_q * S_pos * norm.cdf(d1) - K_pos * disc_r * norm.cdf(d2)
+    put_val  = K_pos * disc_r * norm.cdf(-d2) - disc_q * S_pos * norm.cdf(-d1)
+
+    # --- 7) Merge intrinsic for expired points with formula for live points.
     if option_type.lower() == "call":
-        return float(disc_q * S * norm.cdf(d1) - K * disc_r * norm.cdf(d2))
+        # Use intrinsic where expired; formula where alive.
+        px = np.where(is_expired, intrinsic_call, call_val)
     elif option_type.lower() == "put":
-        return float(K * disc_r * norm.cdf(-d2) - disc_q * S * norm.cdf(-d1))
+        px = np.where(is_expired, intrinsic_put,  put_val)
     else:
         raise ValueError("option_type must be 'call' or 'put'")
+
+    # --- 8) Return scalar when all inputs were scalars, else ndarray.
+    return px if px.ndim else float(px)
 
 
 def bs_d1_d2(S, K, T, r, sigma, q=0.0):
