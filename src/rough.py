@@ -346,3 +346,82 @@ def rbergomi_euro_mc(
     stderr = float(np.std(disc, ddof=1) / math.sqrt(n_paths))
     return price, stderr
 
+
+
+def _validate_option(opt):
+    s=str(opt).lower()
+    if s not in ("call","put"): raise ValueError("option must be 'call' or 'put'")
+    return s
+def _gamma(x): return math.gamma(float(x))
+
+def _kernel_weights(H, N, dt):
+    H=float(H); N=int(N)
+    if not (0.0 < H < 1.0): raise ValueError("H must be in (0,1)")
+    if N<1: raise ValueError("N must be >= 1")
+    m = np.arange(0, N+1, dtype=float)
+    alpha = np.zeros(N+1, dtype=float)
+    if N>=1: alpha[1:] = m[1:]**(H+0.5) - m[:-1]**(H+0.5)
+    cH = 1.0/_gamma(H+0.5)
+    drift_scale = cH * (dt**(H+0.5))
+    diff_scale  = cH * (dt**H)
+    return cH, alpha, drift_scale, diff_scale
+
+def rough_heston_paths(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, q=0.0, seed=None, batch_size=1024):
+    S0=_floor_pos(S0); v0=max(float(v0),0.0); T=_floor_pos(T)
+    N=int(N); n_paths=int(n_paths)
+    if N<1 or n_paths<1: raise ValueError("N and n_paths must be >= 1")
+    if not (-0.999 < rho < 0.999): raise ValueError("rho must be in (-0.999,0.999)")
+    if not (0.0 < float(H) < 1.0): raise ValueError("H must be in (0,1)")
+    kappa=float(kappa); theta=max(float(theta),0.0); eta=_floor_pos(eta)
+    r=float(r); q=float(q); batch_size=int(max(1,batch_size))
+
+    rng = np.random.default_rng(seed)
+    t = np.linspace(0.0, T, N+1); dt = T/N; sqrt_dt = math.sqrt(dt)
+    _, alpha, drift_scale, diff_scale = _kernel_weights(H, N, dt)
+
+    S = np.empty((n_paths, N+1)); V = np.empty((n_paths, N+1))
+    S[:,0]=S0; V[:,0]=v0
+
+    for start in range(0, n_paths, batch_size):
+        end=min(n_paths,start+batch_size); m=end-start
+        Z1 = rng.standard_normal((m,N))
+        Z2 = rng.standard_normal((m,N))
+        dW_S = rho*Z2 + math.sqrt(1.0-rho*rho)*Z1
+
+        Sb = np.empty((m,N+1)); Vb = np.empty((m,N+1))
+        Sb[:,0]=S0; Vb[:,0]=v0
+
+        for k in range(N):
+            Vk = np.maximum(Vb[:,k],1e-14); sqrtVk = np.sqrt(Vk)
+
+            idx = np.arange(k+1); mlag=(k+1)-idx
+            a = alpha[mlag]
+            V_hist  = Vb[:,:k+1]
+            Z2_hist = Z2[:,:k+1]
+            sqrtV   = np.sqrt(np.maximum(V_hist,1e-14))
+            drift_conv = np.dot(kappa*(theta - V_hist), a)
+            diff_conv  = np.dot(sqrtV * Z2_hist, a)
+
+            V_next = v0 + drift_scale*drift_conv + eta*diff_scale*diff_conv
+            V_next = np.maximum(V_next,1e-14)
+            Vb[:,k+1]=V_next
+
+            Sb[:,k+1] = Sb[:,k] * np.exp((r-q)*dt - 0.5*Vk*dt + sqrtVk*sqrt_dt*dW_S[:,k])
+
+        S[start:end,:]=Sb; V[start:end,:]=Vb
+
+    return t, S, V
+
+def rough_heston_euro_mc(S0, v0, K, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, q=0.0, option="call", seed=None, batch_size=1024):
+    option=_validate_option(option); K=_floor_pos(K)
+    if N < 1 or n_paths < 1:
+        raise ValueError("N and n_paths must be >= 1")
+    if K <= 0.0:
+        raise ValueError("K must be positive")
+    t,S,V = rough_heston_paths(S0,v0,T,N,n_paths,H,kappa,theta,eta,rho,r,q,seed,batch_size)
+    ST = S[:,-1]
+    payoff = np.maximum(ST-K,0.0) if option=="call" else np.maximum(K-ST,0.0)
+    DF = math.exp(-r*T); disc = DF*payoff
+    price = float(np.mean(disc)); stderr = float(np.std(disc, ddof=1)/math.sqrt(S.shape[0]))
+    return price, stderr
+
