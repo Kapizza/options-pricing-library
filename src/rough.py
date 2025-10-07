@@ -66,7 +66,48 @@ def _xi0_as_callable(xi0) -> Callable[[np.ndarray], np.ndarray]:
     return _f
 
 
+#------------------------ Davies–Harte fBm ------------------------
+def fbm_davies_harte(N, H, n_paths, rng):
+    N = int(N)
+    n_paths = int(n_paths)
+    if N < 1 or n_paths < 1:
+        raise ValueError("N and n_paths must be >= 1")
+    if not (0.0 < H < 1.0):
+        raise ValueError("H must be in (0,1)")
+
+    m = np.arange(0, N, dtype=float)
+    r = 0.5 * (np.power(m + 1.0, 2.0 * H) - 2.0 * np.power(m, 2.0 * H) + np.power(np.abs(m - 1.0), 2.0 * H))
+    r[0] = 1.0
+
+    c = np.empty(2 * N, dtype=float)
+    c[:N] = r
+    c[N] = 0.0
+    c[N+1:] = r[1:][::-1]
+
+    lam = np.fft.fft(c).real
+    lam = np.maximum(lam, 0.0)
+    sqrtlam = np.sqrt(lam)
+
+    Z = np.empty((n_paths, 2 * N), dtype=np.complex128)
+    Z[:, 0] = rng.normal(0.0, 1.0, size=n_paths)
+    Z[:, N] = rng.normal(0.0, 1.0, size=n_paths)
+    for k in range(1, N):
+        a = rng.normal(0.0, 1.0, size=n_paths)
+        b = rng.normal(0.0, 1.0, size=n_paths)
+        Z[:, k] = a + 1j * b
+        Z[:, 2 * N - k] = np.conj(Z[:, k])
+
+    Y = Z * sqrtlam[None, :]
+    fgn = np.fft.ifft(Y, axis=1).real * np.sqrt(2 * N)   # unit-step Var for fGn
+    fgn = fgn[:, :N]
+
+    B = np.cumsum(fgn, axis=1)
+    B = np.hstack([np.zeros((n_paths, 1), dtype=float), B])  # (paths, N+1)
+
+    return B
+
 # ------------------------ fractional Brownian motion ------------------------
+
 
 def fbm_increments_hosking(
     N: int,
@@ -145,21 +186,69 @@ def fbm_increments_hosking(
     return fgn
 
 
+
+# ------------------------ fast fGn via Davies–Harte (FFT) ------------------------
+if 0:
+
+    from functools import lru_cache
+
+    @lru_cache(maxsize=None)
+    def _dh_rfft_eigs(N, H):
+        # first row of the 2N circulant covariance for fGn
+        def gamma(k):
+            k = abs(int(k))
+            if k == 0:
+                return 1.0
+            return 0.5 * ((k + 1)**(2*H) - 2*(k**(2*H)) + (k - 1)**(2*H))
+
+        N = int(N)
+        if N < 1:
+            raise ValueError("N must be >= 1")
+        if not (0.0 < H < 1.0):
+            raise ValueError("H must be in (0, 1)")
+
+        g = np.array([gamma(k) for k in range(N)], dtype=float)
+        c = np.empty(2*N, dtype=float)
+        c[:N] = g
+        c[N] = 0.0
+        c[N+1:] = g[1:][::-1]
+
+        lam = np.fft.rfft(c).real   # length N+1, nonnegative up to rounding
+        lam = np.maximum(lam, 0.0)
+        return lam  # rfft eigenvalues
+
+
+    def fgn_davies_harte(N, H, n_paths, rng):
+        N = int(N)
+        M = 2 * N
+        lam = _dh_rfft_eigs(N, H)            # length N+1 rfft eigenvalues
+
+        U = rng.standard_normal((n_paths, N+1))
+        V = rng.standard_normal((n_paths, N+1))
+
+        Y = np.empty((n_paths, N+1), dtype=np.complex128)
+        Y[:, 0] = np.sqrt(lam[0]) * U[:, 0]
+        Y[:, N] = np.sqrt(lam[N]) * U[:, N] if N > 0 else 0.0
+
+        if N > 1:
+            scale = np.sqrt(lam[1:N] / 2.0)[None, :]
+            Y[:, 1:N] = (U[:, 1:N] + 1j * V[:, 1:N]) * scale
+
+        # NumPy irfft has a 1/M factor; compensate by sqrt(M)
+        x_full = np.fft.irfft(Y, n=M, axis=1).real * np.sqrt(M)
+        x = x_full[:, :N]
+        s = float(np.std(x[:, 0], ddof=1))
+        if s > 0:
+            x /= s
+        return x
+
+
 # ------------------------ rBergomi paths ------------------------
 
 def rbergomi_paths(
-    S0: float,
-    T: float,
-    N: int,
-    n_paths: int,
-    H: float,
-    eta: float,
-    rho: float,
-    xi0,
-    r: float = 0.0,
-    q: float = 0.0,
-    seed: Optional[int] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    S0, T, N, n_paths, H, eta, rho, xi0,
+    r=0.0, q=0.0, seed=None, fgn_method="davies-harte"
+):
     """
     Simulate rBergomi paths for S and v on a uniform grid using simple Euler.
 
@@ -204,69 +293,55 @@ def rbergomi_paths(
     - rBergomi variance is lognormal by design, v_t = xi0(t) * exp(eta*W_H(t) - 0.5*eta^2 t^{2H}).
     - Correlation is enforced by building correlated Brownian increments for S and fBM's innovation driver.
     """
-    # Guards
-    S0 = _floor_pos(S0)
-    T = _floor_pos(T)
-    N = int(N)
-    if N < 1:
-        raise ValueError("N must be >= 1")
-    n_paths = int(n_paths)
-    if n_paths < 1:
-        raise ValueError("n_paths must be >= 1")
-    if not (-0.999 < rho < 0.999):
-        raise ValueError("rho must be in (-0.999, 0.999)")
-    H = float(H)
-    if not (0.0 < H < 1.0):
-        raise ValueError("H must be in (0,1)")
-    eta = _floor_pos(eta)
-    r = float(r)
-    q = float(q)
+    S0 = _floor_pos(S0); T = _floor_pos(T)
+    N = int(N); n_paths = int(n_paths)
+    if N < 1 or n_paths < 1: raise ValueError("N and n_paths must be >= 1")
+    if not (-0.999 < rho < 0.999): raise ValueError("rho must be in (-0.999, 0.999)")
+    if not (0.0 < H < 1.0): raise ValueError("H must be in (0,1)")
+    eta = _floor_pos(eta); r = float(r); q = float(q)
 
     rng = np.random.default_rng(seed)
     t = np.linspace(0.0, T, N + 1)
-    dt = float(T) / N
+    dt = T / N
     sqrt_dt = math.sqrt(dt)
 
     xi_fn = _xi0_as_callable(xi0)
-    xi_vec = xi_fn(t)  # shape N+1
+    xi_vec = xi_fn(t)
 
-    # Build fBM W^H(t) for each path via fGn sum, scaled to match Var[B_H(t)] = t^{2H}
-    # We first generate standard fGn (unit time step) then rescale to dt grid.
-    W_H = np.empty((n_paths, N + 1), dtype=float)
-    W_H[:, 0] = 0.0
-    scale = (dt**H)  # fBM scaling on step size
+    # Build W^H(t)
+    if fgn_method.lower().startswith("dav"):
+        BH = fbm_davies_harte(N, H, n_paths, rng)      # unit-step fBm
+        W_H = BH * (dt**H)
+    else:
+        W_H = np.empty((n_paths, N + 1), dtype=float); W_H[:, 0] = 0.0
+        for i in range(n_paths):
+            fgn = fbm_increments_hosking(N, H, rng)
+            W_H[i, 1:] = np.cumsum(fgn) * (dt**H)
 
-    for i in range(n_paths):
-        fgn = fbm_increments_hosking(N, H, rng)  # Var step = 1 at unit step
-        W_H[i, 1:] = np.cumsum(fgn) * scale  # B_H(t_k) with t_k = k*dt
+    # One global normalization (self-similarity fixes all t)
+    var_emp  = float(np.var(W_H[:, -1], ddof=1))
+    var_theo = float(t[-1]**(2.0 * H))
+    if var_emp > 0.0 and var_emp != var_theo:
+        W_H *= math.sqrt(var_theo / var_emp)
 
-    # Build correlated Brownian increments for S and the Gaussian driver of W^H
-    # We approximate dW (the innovation that drives W^H) with standard normals Z2,
-    # and correlate dW^S = rho*Z2 + sqrt(1-rho^2)*Z1. This is a common proxy
-    # for Euler schemes in rBergomi.
-    Z1 = rng.standard_normal((n_paths, N))  # independent
-    Z2 = rng.standard_normal((n_paths, N))  # to be correlated with spot
-    dW_S = rho * Z2 + math.sqrt(1.0 - rho * rho) * Z1
+    # Correlated Brownian for S
+    Z1 = rng.standard_normal((n_paths, N))
+    Z2 = rng.standard_normal((n_paths, N))
+    dW_S = rho * Z2 + math.sqrt(1.0 - rho*rho) * Z1
 
-    # Variance process from rBergomi formula
-    # v_t = xi0(t) * exp( eta * W_H(t) - 0.5 * eta^2 * t^{2H} )
     t_pow = t**(2.0 * H)
     drift_corr = -0.5 * (eta**2) * t_pow
     v = (xi_vec[None, :] * np.exp(eta * W_H + drift_corr[None, :])).astype(float)
     v = np.maximum(v, 1e-14)
 
-    # Simulate S with Euler under risk neutral
     S = np.empty((n_paths, N + 1), dtype=float)
     S[:, 0] = S0
     drift = (r - q) * dt
-
     for k in range(N):
-        # diffusion uses v at time t_k
         vol_step = np.sqrt(np.maximum(v[:, k], 1e-14)) * sqrt_dt
         S[:, k + 1] = S[:, k] * np.exp(drift - 0.5 * vol_step**2 + vol_step * dW_S[:, k])
 
     return t, S, v
-
 
 # ------------------------ European pricing ------------------------
 

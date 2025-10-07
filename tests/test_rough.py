@@ -222,3 +222,98 @@ def test_regression_anchor_small_seeded(base_params):
     # Just check sane range and that CI is not absurdly wide.
     assert 1.0 < price < 25.0
     assert se < 1.0
+
+
+def _recover_WH_from_v(v, xi0, eta, t, H):
+    # W_H(t) = [ ln(v/xi0) + 0.5*eta^2*t^{2H} ] / eta
+    t2H = t**(2.0 * H)
+    ln_term = np.log(np.maximum(v, 1e-300) / float(xi0))
+    return (ln_term + 0.5 * (eta**2) * t2H[None, :]) / float(eta)
+
+
+@pytest.fixture(scope="module")
+def base():
+    pars = dict(
+        S0=100.0,
+        T=0.75,
+        N=192,
+        n_paths=6000,   # keep moderate for speed; raise if needed
+        H=0.10,
+        eta=1.5,
+        rho=-0.7,
+        r=0.02,
+        q=0.00,
+        xi0=0.04,       # flat forward variance
+        seed=123,
+    )
+    return pars
+
+
+def _run(pars, method):
+    t, S, v = rbergomi_paths(
+        S0=pars["S0"], T=pars["T"], N=pars["N"], n_paths=pars["n_paths"],
+        H=pars["H"], eta=pars["eta"], rho=pars["rho"], xi0=pars["xi0"],
+        r=pars["r"], q=pars["q"], seed=pars["seed"], fgn_method=method
+    )
+    return t, S, v
+
+
+def test_mean_variance_flat_under_flat_xi0_davies_harte(base):
+    # Mean of v_t should be roughly flat around xi0 for flat xi0
+    t, S, v = _run(base, "davies-harte")
+    xi0 = base["xi0"]
+
+    idxs = [int(0.1*base["N"]), int(0.5*base["N"]), int(0.9*base["N"])]
+    mean_v = v.mean(axis=0)
+
+    # tolerate a small MC bias; if this fails with very low n_paths, increase n_paths
+    for k in idxs:
+        assert abs(float(mean_v[k]) - xi0) < 4e-3, f"mean v deviates at t={t[k]:.3f}"
+
+
+def test_wh_variance_matches_theory_davies_harte(base):
+    # Var[W_H(t)] across paths should match t^{2H} within a reasonable band
+    t, S, v = _run(base, "davies-harte")
+    H = base["H"]
+    xi0 = base["xi0"]
+    eta = base["eta"]
+
+    W = _recover_WH_from_v(v, xi0, eta, t, H)
+
+    idxs = [int(0.1*base["N"]), int(0.5*base["N"]), int(0.9*base["N"])]
+    for k in idxs:
+        emp = float(np.var(W[:, k], ddof=1))
+        theo = float(t[k]**(2.0 * H))
+        # allow 15 percent relative error
+        assert abs(emp - theo) <= 0.15 * max(1e-12, theo), f"k={k}, emp={emp}, theo={theo}"
+
+
+def test_davies_harte_and_hosking_agree_on_means(base):
+    # Compare FFT vs Hosking on the mean of v at end time
+    t1, S1, v1 = _run(base, "davies-harte")
+    t2, S2, v2 = _run(base, "hosking")
+
+    m1 = float(v1.mean(axis=0)[-1])
+    m2 = float(v2.mean(axis=0)[-1])
+    # should be very close and both near xi0
+    assert abs(m1 - base["xi0"]) < 5e-3
+    assert abs(m2 - base["xi0"]) < 5e-3
+    assert abs(m1 - m2) < 3e-3
+
+
+def test_variance_is_stochastic_not_deterministic(base):
+    # Cross-sectional variance of v at mid time should be non-trivial
+    t, S, v = _run(base, "davies-harte")
+    k = int(0.5 * base["N"])
+    cross_var = float(np.var(v[:, k], ddof=1))
+    assert cross_var > 1e-6, f"variance across paths too small: {cross_var}"
+
+
+@pytest.mark.slow
+def test_speed_branch_selection_visible(base):
+    # This is a light speed check, not a strict benchmark. It confirms both methods run.
+    # If you prefer to skip timing, keep this as a functional smoke test.
+    t1, S1, v1 = _run(base, "davies-harte")
+    t2, S2, v2 = _run(base, "hosking")
+    assert S1.shape == S2.shape == (base["n_paths"], base["N"] + 1)
+    assert v1.shape == v2.shape
