@@ -55,6 +55,7 @@ def test_rbergomi_calibration_recovers_params_iv():
         seed=seed_mkt,                                   # CRN with market mids
         verbose=False,
         print_every=20,
+        parallel_backend="thread",
     )
 
     # tolerances are still loose to allow MC noise
@@ -96,6 +97,7 @@ def test_rough_heston_calibration_recovers_params_price():
         options={"maxiter": 45},
         verbose=False,
         print_every=10,
+        parallel_backend="thread",
     )
 
     # --- checks: loose band due to MC noise and many params ---
@@ -134,6 +136,7 @@ def test_smoke_iv_mode_and_progress_history():
         options={"maxiter": 12},
         verbose=True,        # exercise the monitor
         print_every=2,
+        parallel_backend="thread",
     )
 
     assert "history" in best and isinstance(best["history"], list)

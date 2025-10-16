@@ -28,6 +28,7 @@ Notes:
 
 from __future__ import annotations
 import math
+import os
 import numpy as np
 from typing import Callable, Tuple, Optional
 
@@ -64,6 +65,47 @@ def _xi0_as_callable(xi0) -> Callable[[np.ndarray], np.ndarray]:
         # fallback to last value if shorter
         return np.resize(x.astype(float), tgrid.size)
     return _f
+
+
+
+# ---------- parallel utilities ----------
+
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from numpy.random import SeedSequence
+
+def _split_batches(n, batch_size):
+    n = int(n); batch_size = int(max(1, batch_size))
+    sizes = []
+    done = 0
+    while done < n:
+        take = min(batch_size, n - done)
+        sizes.append(take)
+        done += take
+    return sizes
+
+def _child_seeds(base_seed, n_children):
+    ss = SeedSequence(int(base_seed))
+    kids = ss.spawn(int(n_children))
+    # return raw ints for np.random.default_rng
+    return [int(k.generate_state(1)[0]) for k in kids]
+
+
+# Try to avoid thread oversubscription when we parallelize at Python level.
+# Respect existing env if the user already configured them.
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    if _var not in os.environ:
+        os.environ[_var] = "1"
+
+# Optional Numba acceleration
+try:  # pragma: no cover - optional dependency
+    from numba import njit, prange
+except Exception:  # pragma: no cover
+    njit = None
+    prange = range  # fallback
+
+_HAS_NUMBA = njit is not None
+
+
 
 
 #------------------------ Davies–Harte fBm ------------------------
@@ -343,6 +385,90 @@ def rbergomi_paths(
 
     return t, S, v
 
+
+
+# ---------- rBergomi parallel wrapper ----------
+
+def _rbergomi_worker(args):
+    # separate function so it's pickleable by ProcessPool on Windows
+    (S0,T,N,n_i,H,eta,rho,xi0,r,q,seed,fgn_method) = args
+    return rbergomi_paths(
+        S0=S0, T=T, N=N, n_paths=n_i, H=H, eta=eta, rho=rho,
+        xi0=xi0, r=r, q=q, seed=seed, fgn_method=fgn_method
+    )
+
+def _rbergomi_terminal_worker(args):
+    # Returns only terminal values to reduce IPC costs
+    (S0,T,N,n_i,H,eta,rho,xi0,r,q,seed,fgn_method) = args
+    t, S, _v = rbergomi_paths(
+        S0=S0, T=T, N=N, n_paths=n_i, H=H, eta=eta, rho=rho,
+        xi0=xi0, r=r, q=q, seed=seed, fgn_method=fgn_method
+    )
+    return S[:, -1]
+
+def rbergomi_paths_parallel(
+    S0, T, N, n_paths, H, eta, rho, xi0,
+    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    n_workers=4, batch_size=8192, return_variance=True
+):
+    """
+    Parallel rBergomi: split n_paths into batches and run in processes.
+
+    Notes:
+    - Set MKL_NUM_THREADS=1 and OMP_NUM_THREADS=1 in your shell to avoid overthreading.
+    - On Windows, wrap calls in 'if __name__ == "__main__":' when running as a script.
+    """
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+
+    tasks = []
+    for n_i, s in zip(sizes, seeds):
+        tasks.append((S0, T, N, n_i, H, eta, rho, xi0, r, q, s, fgn_method))
+
+    with ProcessPoolExecutor(max_workers=int(n_workers)) as ex:
+        outs = list(ex.map(_rbergomi_worker, tasks))
+
+    # merge
+    t = outs[0][0]
+    S = np.vstack([o[1] for o in outs])
+    if return_variance:
+        v = np.vstack([o[2] for o in outs])
+        return t, S, v
+    return t, S
+
+def rbergomi_paths_parallel_pool(
+    executor,
+    S0, T, N, n_paths, H, eta, rho, xi0,
+    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    batch_size=8192, return_variance=True
+):
+    """Same as rbergomi_paths_parallel but reuses a provided executor."""
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+    tasks = [(S0, T, N, n_i, H, eta, rho, xi0, r, q, s, fgn_method) for n_i, s in zip(sizes, seeds)]
+    outs = list(executor.map(_rbergomi_worker, tasks))
+    t = outs[0][0]
+    S = np.vstack([o[1] for o in outs])
+    if return_variance:
+        v = np.vstack([o[2] for o in outs])
+        return t, S, v
+    return t, S
+
+def rbergomi_terminal_parallel_pool(
+    executor,
+    S0, T, N, n_paths, H, eta, rho, xi0,
+    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    batch_size=8192
+):
+    """Parallel rBergomi returning only terminal ST to minimize IPC."""
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+    tasks = [(S0, T, N, n_i, H, eta, rho, xi0, r, q, s, fgn_method) for n_i, s in zip(sizes, seeds)]
+    outs = list(executor.map(_rbergomi_terminal_worker, tasks))
+    ST = np.concatenate(outs, axis=0)
+    return ST
+
+
 # ------------------------ European pricing ------------------------
 
 def rbergomi_euro_mc(
@@ -441,7 +567,7 @@ def _kernel_weights(H, N, dt):
     diff_scale  = cH * (dt**H)
     return cH, alpha, drift_scale, diff_scale
 
-def rough_heston_paths(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, q=0.0, seed=None, batch_size=1024):
+def _rough_heston_paths_python(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, q=0.0, seed=None, batch_size=1024):
     S0=_floor_pos(S0); v0=max(float(v0),0.0); T=_floor_pos(T)
     N=int(N); n_paths=int(n_paths)
     if N<1 or n_paths<1: raise ValueError("N and n_paths must be >= 1")
@@ -486,6 +612,175 @@ def rough_heston_paths(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, 
         S[start:end,:]=Sb; V[start:end,:]=Vb
 
     return t, S, V
+
+
+if _HAS_NUMBA:  # pragma: no cover - optional dependency
+
+    @njit(parallel=True)
+    def _rough_heston_kernel(S0, v0, dt, sqrt_dt, N, rho, r, q, kappa, theta, eta,
+                             alpha, drift_scale, diff_scale, Z1, Z2, S_out, V_out):
+        n_paths = S_out.shape[0]
+        sqrt1mrho2 = math.sqrt(max(1.0 - rho * rho, 0.0))
+        for i in prange(n_paths):
+            S_out[i, 0] = S0
+            V_out[i, 0] = v0
+            for k in range(N):
+                Vk_raw = V_out[i, k]
+                Vk = Vk_raw if Vk_raw > 1e-14 else 1e-14
+                sqrtVk = math.sqrt(Vk)
+
+                drift_conv = 0.0
+                diff_conv = 0.0
+                for j in range(k + 1):
+                    a = alpha[k + 1 - j]
+                    v_hist = V_out[i, j]
+                    drift_conv += kappa * (theta - v_hist) * a
+                    v_hist_clamped = v_hist if v_hist > 1e-14 else 1e-14
+                    diff_conv += math.sqrt(v_hist_clamped) * Z2[i, j] * a
+
+                V_next = v0 + drift_scale * drift_conv + eta * diff_scale * diff_conv
+                if V_next < 1e-14:
+                    V_next = 1e-14
+                V_out[i, k + 1] = V_next
+
+                dW_S = rho * Z2[i, k] + sqrt1mrho2 * Z1[i, k]
+                S_out[i, k + 1] = S_out[i, k] * math.exp((r - q) * dt - 0.5 * Vk * dt + sqrtVk * sqrt_dt * dW_S)
+
+    def _rough_heston_paths_numba(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+                                  r=0.0, q=0.0, seed=None, batch_size=1024):
+        S0 = _floor_pos(S0); v0 = max(float(v0), 0.0); T = _floor_pos(T)
+        N = int(N); n_paths = int(n_paths)
+        if N < 1 or n_paths < 1:
+            raise ValueError("N and n_paths must be >= 1")
+        if not (-0.999 < rho < 0.999):
+            raise ValueError("rho must be in (-0.999,0.999)")
+        if not (0.0 < float(H) < 1.0):
+            raise ValueError("H must be in (0,1)")
+        kappa = float(kappa); theta = max(float(theta), 0.0); eta = _floor_pos(eta)
+        r = float(r); q = float(q); batch_size = int(max(1, batch_size))
+
+        rng = np.random.default_rng(seed)
+        t = np.linspace(0.0, T, N + 1)
+        dt = T / N
+        sqrt_dt = math.sqrt(dt)
+        _, alpha, drift_scale, diff_scale = _kernel_weights(H, N, dt)
+        alpha = np.ascontiguousarray(alpha, dtype=float)
+
+        S = np.empty((n_paths, N + 1), dtype=float)
+        V = np.empty((n_paths, N + 1), dtype=float)
+
+        for start in range(0, n_paths, batch_size):
+            end = min(n_paths, start + batch_size)
+            m = end - start
+            Z1 = rng.standard_normal((m, N))
+            Z2 = rng.standard_normal((m, N))
+            Sb = np.empty((m, N + 1), dtype=float)
+            Vb = np.empty((m, N + 1), dtype=float)
+            _rough_heston_kernel(S0, v0, dt, sqrt_dt, N, float(rho), float(r), float(q),
+                                 float(kappa), float(theta), float(eta),
+                                 alpha, float(drift_scale), float(diff_scale),
+                                 Z1, Z2, Sb, Vb)
+            S[start:end, :] = Sb
+            V[start:end, :] = Vb
+
+        return t, S, V
+
+else:
+
+    def _rough_heston_paths_numba(*args, **kwargs):  # pragma: no cover
+        raise RuntimeError("Numba is not available")
+
+
+def _resolve_use_numba(flag):
+    if flag is None:
+        return _HAS_NUMBA
+    return bool(flag) and _HAS_NUMBA
+
+
+def rough_heston_paths(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+                       r=0.0, q=0.0, seed=None, batch_size=1024, use_numba=None):
+    """
+    Rough Heston path generator with optional Numba acceleration.
+    """
+    use_numba_flag = _resolve_use_numba(use_numba)
+    if use_numba_flag:
+        return _rough_heston_paths_numba(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+                                         r=r, q=q, seed=seed, batch_size=batch_size)
+    return _rough_heston_paths_python(S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+                                      r=r, q=q, seed=seed, batch_size=batch_size)
+
+
+# ---------- Rough Heston parallel wrapper ----------
+
+def _rough_heston_worker(args):
+    (S0,v0,T,N,n_i,H,kappa,theta,eta,rho,r,q,seed,batch_size,use_numba) = args
+    return rough_heston_paths(
+        S0=S0, v0=v0, T=T, N=N, n_paths=n_i, H=H, kappa=kappa, theta=theta,
+        eta=eta, rho=rho, r=r, q=q, seed=seed, batch_size=batch_size, use_numba=use_numba
+    )
+
+def _rough_heston_terminal_worker(args):
+    (S0,v0,T,N,n_i,H,kappa,theta,eta,rho,r,q,seed,batch_size,use_numba) = args
+    t, S, V = rough_heston_paths(
+        S0=S0, v0=v0, T=T, N=N, n_paths=n_i, H=H, kappa=kappa, theta=theta,
+        eta=eta, rho=rho, r=r, q=q, seed=seed, batch_size=batch_size, use_numba=use_numba
+    )
+    return S[:, -1]
+
+def rough_heston_paths_parallel(
+    S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+    r=0.0, q=0.0, base_seed=12345, n_workers=4, batch_size=4096, use_numba=None
+):
+    """
+    Parallel rough-Heston: split n_paths into process batches.
+    """
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+    use_numba_flag = _resolve_use_numba(use_numba)
+
+    tasks = []
+    for n_i, s in zip(sizes, seeds):
+        tasks.append((S0, v0, T, N, n_i, H, kappa, theta, eta, rho, r, q, s, batch_size, use_numba_flag))
+
+    with ProcessPoolExecutor(max_workers=int(n_workers)) as ex:
+        outs = list(ex.map(_rough_heston_worker, tasks))
+
+    # merge
+    t = outs[0][0]
+    S = np.vstack([o[1] for o in outs])
+    V = np.vstack([o[2] for o in outs])
+    return t, S, V
+
+def rough_heston_paths_parallel_pool(
+    executor,
+    S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+    r=0.0, q=0.0, base_seed=12345, batch_size=4096, use_numba=None
+):
+    """Same as rough_heston_paths_parallel but reuses a provided executor."""
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+    use_numba_flag = _resolve_use_numba(use_numba)
+    tasks = [(S0, v0, T, N, n_i, H, kappa, theta, eta, rho, r, q, s, batch_size, use_numba_flag) for n_i, s in zip(sizes, seeds)]
+    outs = list(executor.map(_rough_heston_worker, tasks))
+    t = outs[0][0]
+    S = np.vstack([o[1] for o in outs])
+    V = np.vstack([o[2] for o in outs])
+    return t, S, V
+
+def rough_heston_terminal_parallel_pool(
+    executor,
+    S0, v0, T, N, n_paths, H, kappa, theta, eta, rho,
+    r=0.0, q=0.0, base_seed=12345, batch_size=4096, use_numba=None
+):
+    """Parallel rough-Heston returning only terminal ST to minimize IPC."""
+    sizes = _split_batches(n_paths, batch_size)
+    seeds = _child_seeds(base_seed, len(sizes))
+    use_numba_flag = _resolve_use_numba(use_numba)
+    tasks = [(S0, v0, T, N, n_i, H, kappa, theta, eta, rho, r, q, s, batch_size, use_numba_flag) for n_i, s in zip(sizes, seeds)]
+    outs = list(executor.map(_rough_heston_terminal_worker, tasks))
+    ST = np.concatenate(outs, axis=0)
+    return ST
+
 
 def rough_heston_euro_mc(S0, v0, K, T, N, n_paths, H, kappa, theta, eta, rho, r=0.0, q=0.0, option="call", seed=None, batch_size=1024):
     option=_validate_option(option); K=_floor_pos(K)
