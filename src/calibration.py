@@ -110,18 +110,35 @@ def calibrate_cached(
     fpath = _cache_file(cache_dir, model, key)
     if os.path.exists(fpath):
         blob = json.load(open(fpath, "r", encoding="utf-8"))
-        blob.setdefault("cache_file", fpath)
-        print(f"[cache hit] {model} → {os.path.relpath(fpath)}")
-        return blob["best"], blob
+        best_blob = blob.get("best")
+        cache_ok = True
+        if isinstance(best_blob, dict):
+            obj_val = best_blob.get("obj")
+            try:
+                obj_val_f = float(obj_val)
+            except (TypeError, ValueError):
+                obj_val_f = math.inf
+            if (not math.isfinite(obj_val_f)) or (obj_val_f >= 1e6):
+                cache_ok = False
+        elif best_blob is None:
+            cache_ok = False
+
+        if cache_ok:
+            blob.setdefault("cache_file", fpath)
+            print(f"[cache hit] {model} -> {os.path.relpath(fpath)}")
+            return blob["best"], blob
+        else:
+            print(f"[cache stale] {model} -> {os.path.relpath(fpath)} (ignored)")
 
     t0 = time.time()
     base_kwargs = dict(metric=metric, vega_weight=vega_weight, x0=x0, mc=mc, seed=seed, bounds=bounds, multistart=multistart, options=options)
     kwargs = _apply_supported_kwargs(calibrate_fn, base_kwargs, runtime_overrides)
     best, raw = calibrate_fn(smiles, **kwargs)
     dt = time.time() - t0
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
     blob = {"best": best, "raw": {}, "elapsed_sec": dt, "cfg": _to_ser(cfg), "cache_file": fpath}
     json.dump(_to_ser(blob), open(fpath, "w", encoding="utf-8"), indent=2)
-    print(f"[cache saved] {model} ({dt:.2f}s) → {os.path.relpath(fpath)}")
+    print(f"[cache saved] {model} ({dt:.2f}s) -> {os.path.relpath(fpath)}")
     return best, blob
 
 
@@ -227,15 +244,30 @@ def _smile_from_ST(ST, r, T, strikes, cp="call"):
 def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, terminal_only=True):
     # params = [H, eta, rho, xi0]
     H, eta, rho, xi0 = params
-    if not (-0.999 < rho < 0.999) or xi0 <= 0 or not (0.0 < H < 0.5):
+    eps = 1e-6
+    if rho <= -0.999:
+        rho = -0.999 + eps
+    elif rho >= 0.999:
+        rho = 0.999 - eps
+    if not (-0.999 < rho < 0.999) or xi0 <= 0 or eta <= 0 or not (0.0 < H < 0.5):
         return 1e6
+    if H >= 0.5:
+        H = 0.5 - eps
 
     err2 = 0.0
     for (S0, r, q, T, strikes, mids, cp, mkt_iv_opt) in data:
         base_seed = seed + int(1000 * T)
+        # Steps-per-year support
+        N_eff = mc.get("N", 192)
+        Npy = mc.get("N_per_year", None)
+        if Npy is not None:
+            try:
+                N_eff = max(int(mc.get("N_min", 128)), int(math.ceil(float(Npy) * float(T))))
+            except Exception:
+                N_eff = mc.get("N", 192)
         if exec_ctx is None:
             t, S_paths, _V = rbergomi_paths_parallel(
-                S0=S0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
+                S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
                 r=r, q=q, base_seed=base_seed, n_workers=mc.get("n_workers", 4),
                 fgn_method=mc.get("fgn_method", "davies-harte")
             )
@@ -244,14 +276,14 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
             if terminal_only:
                 ST = rbergomi_terminal_parallel_pool(
                     exec_ctx,
-                    S0=S0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
+                    S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
                     r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
                     batch_size=mc.get("batch_size", 8192)
                 )
             else:
                 _t, S_paths, _V = rbergomi_paths_parallel_pool(
                     exec_ctx,
-                    S0=S0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
+                    S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
                     r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
                     batch_size=mc.get("batch_size", 8192), return_variance=False
                 )
@@ -262,16 +294,38 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
         if metric == "price":
             resid = model_px - mids
             if weights is not None and T in weights:
-                resid = resid * weights[T]
-            err2 += float(resid @ resid)
+                w = np.asarray(weights[T], float)
+                mask = np.isfinite(resid) & np.isfinite(w)
+                resid = resid[mask] * w[mask]
+            else:
+                mask = np.isfinite(resid)
+                resid = resid[mask]
         else:
             mod_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, model_px)])
             mkt_iv = mkt_iv_opt
-            resid = mod_iv - mkt_iv
+            mask = np.isfinite(mod_iv)
+            if mkt_iv is not None:
+                mkt_iv = np.asarray(mkt_iv, float)
+                mask &= np.isfinite(mkt_iv)
             if weights is not None and T in weights:
-                resid = resid * weights[T]
-            err2 += float(resid @ resid)
+                w = np.asarray(weights[T], float)
+                mask &= np.isfinite(w)
+            else:
+                w = None
+            if not np.any(mask):
+                return 1e6
+            resid = mod_iv[mask] - mkt_iv[mask]
+            if w is not None:
+                resid = resid * w[mask]
+            mask_resid = np.isfinite(resid)
+            resid = resid[mask_resid]
 
+        if resid.size == 0:
+            return 1e6
+        err2 += float(resid @ resid)
+
+    if not np.isfinite(err2):
+        return 1e6
     return err2
 
 
@@ -299,6 +353,21 @@ def calibrate_rbergomi(
     if n_workers is not None:
         mc = dict(mc)
         mc["n_workers"] = int(n_workers)
+    else:
+        mc = dict(mc)
+
+    # Heuristic: ensure we have ample batches to keep worker pool busy.
+    try:
+        paths = int(mc.get("paths", 0))
+        workers = int(mc.get("n_workers", 0))
+    except (TypeError, ValueError):
+        paths = workers = 0
+    if paths > 0 and workers > 0:
+        current_bs = int(mc.get("batch_size", max(paths, 1)))
+        # Aim for at least ~2 batches per worker, but keep batches large enough for vectorization.
+        target_bs = max(512, int(math.ceil(paths / (workers * 2))))
+        if current_bs > target_bs:
+            mc["batch_size"] = target_bs
 
     # Precompute market IVs and vega weights
     dat = []
@@ -339,12 +408,18 @@ def calibrate_rbergomi(
             obj = lambda x: _rbergomi_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
+            # Make finite-diff steps large enough relative to parameter scales by default
+            _opt = {"maxiter": 200, "disp": False}
+            if options:
+                _opt.update(options)
+            if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
+                _opt["finite_diff_rel_step"] = 5e-2
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),
                 method="L-BFGS-B",
                 bounds=b,
-                options=options or {"maxiter": 200, "disp": False},
+                options=_opt,
                 callback=mon.cb,
             )
             mon.done(label="best")
@@ -364,16 +439,33 @@ def calibrate_rbergomi(
 def _rough_heston_objective(params, data, metric, weights, mc, seed, exec_ctx=None, terminal_only=True):
     # params = [v0, kappa, theta, eta, rho, H]
     v0, kappa, theta, eta, rho, H = params
-    if v0 <= 0 or theta <= 0 or eta <= 0 or not (-0.999 < rho < 0.999) or not (0.02 < H < 0.5) or kappa <= 0:
+    eps = 1e-6
+    if rho <= -0.999:
+        rho = -0.999 + eps
+    elif rho >= 0.999:
+        rho = 0.999 - eps
+    if v0 <= 0 or theta <= 0 or eta <= 0 or not (-0.999 < rho < 0.999) or kappa <= 0:
         return 1e6
+    if H <= 0.02:
+        H = 0.02 + eps
+    elif H >= 0.5:
+        H = 0.5 - eps
 
     err2 = 0.0
     for (S0, r, q, T, strikes, mids, cp, mkt_iv_opt) in data:
         base_seed = seed + int(1000 * T)
         use_numba_flag = mc.get("use_numba", None)
+        # Steps-per-year support
+        N_eff = mc.get("N", 192)
+        Npy = mc.get("N_per_year", None)
+        if Npy is not None:
+            try:
+                N_eff = max(int(mc.get("N_min", 128)), int(math.ceil(float(Npy) * float(T))))
+            except Exception:
+                N_eff = mc.get("N", 192)
         if exec_ctx is None:
             t, S, V = rough_heston_paths_parallel(
-                S0=S0, v0=v0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
+                S0=S0, v0=v0, T=T, N=N_eff, n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
                 r=r, q=q, base_seed=base_seed, n_workers=mc.get("n_workers", 4),
                 batch_size=mc.get("batch_size", 1024), use_numba=use_numba_flag
             )
@@ -382,14 +474,14 @@ def _rough_heston_objective(params, data, metric, weights, mc, seed, exec_ctx=No
             if terminal_only:
                 ST = rough_heston_terminal_parallel_pool(
                     exec_ctx,
-                    S0=S0, v0=v0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
+                    S0=S0, v0=v0, T=T, N=N_eff, n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
                     r=r, q=q, base_seed=base_seed, batch_size=mc.get("batch_size", 1024),
                     use_numba=use_numba_flag
                 )
             else:
                 _t, S, _V = rough_heston_paths_parallel_pool(
                     exec_ctx,
-                    S0=S0, v0=v0, T=T, N=mc["N"], n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
+                    S0=S0, v0=v0, T=T, N=N_eff, n_paths=mc["paths"], H=H, kappa=kappa, theta=theta, eta=eta, rho=rho,
                     r=r, q=q, base_seed=base_seed, batch_size=mc.get("batch_size", 1024),
                     use_numba=use_numba_flag
                 )
@@ -400,16 +492,38 @@ def _rough_heston_objective(params, data, metric, weights, mc, seed, exec_ctx=No
         if metric == "price":
             resid = model_px - mids
             if weights is not None and T in weights:
-                resid = resid * weights[T]
-            err2 += float(resid @ resid)
+                w = np.asarray(weights[T], float)
+                mask = np.isfinite(resid) & np.isfinite(w)
+                resid = resid[mask] * w[mask]
+            else:
+                mask = np.isfinite(resid)
+                resid = resid[mask]
         else:
             mod_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, model_px)])
             mkt_iv = mkt_iv_opt
-            resid = mod_iv - mkt_iv
+            mask = np.isfinite(mod_iv)
+            if mkt_iv is not None:
+                mkt_iv = np.asarray(mkt_iv, float)
+                mask &= np.isfinite(mkt_iv)
             if weights is not None and T in weights:
-                resid = resid * weights[T]
-            err2 += float(resid @ resid)
+                w = np.asarray(weights[T], float)
+                mask &= np.isfinite(w)
+            else:
+                w = None
+            if not np.any(mask):
+                return 1e6
+            resid = mod_iv[mask] - mkt_iv[mask]
+            if w is not None:
+                resid = resid * w[mask]
+            mask_resid = np.isfinite(resid)
+            resid = resid[mask_resid]
 
+        if resid.size == 0:
+            return 1e6
+        err2 += float(resid @ resid)
+
+    if not np.isfinite(err2):
+        return 1e6
     return err2
 
 
@@ -436,6 +550,24 @@ def calibrate_rough_heston(
     if n_workers is not None:
         mc = dict(mc)
         mc["n_workers"] = int(n_workers)
+    else:
+        mc = dict(mc)
+
+    # Prefer compiled paths when available.
+    if "use_numba" not in mc:
+        mc["use_numba"] = True
+
+    # Keep process pool busy: reduce batch size if it would yield <2 batches per worker.
+    try:
+        paths = int(mc.get("paths", 0))
+        workers = int(mc.get("n_workers", 0))
+    except (TypeError, ValueError):
+        paths = workers = 0
+    if paths > 0 and workers > 0:
+        current_bs = int(mc.get("batch_size", max(paths, 1)))
+        target_bs = max(512, int(math.ceil(paths / (workers * 2))))
+        if current_bs > target_bs:
+            mc["batch_size"] = target_bs
 
     dat = []
     for (S0, r, q, T, strikes, mids, cp) in smiles:
@@ -474,12 +606,17 @@ def calibrate_rough_heston(
             obj = lambda x: _rough_heston_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
+            _opt = {"maxiter": 200, "disp": False}
+            if options:
+                _opt.update(options)
+            if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
+                _opt["finite_diff_rel_step"] = 5e-2
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),
                 method="L-BFGS-B",
                 bounds=b,
-                options=options or {"maxiter": 200, "disp": False},
+                options=_opt,
                 callback=mon.cb,
             )
             mon.done(label="best")
