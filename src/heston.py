@@ -5,7 +5,12 @@
 import numpy as np
 from .black_scholes import black_scholes_price  # fallback in sigma→0 regime
 
-__all__ = ["heston_charfunc", "heston_price", "heston_call_put"]
+__all__ = [
+    "heston_charfunc",
+    "heston_price",
+    "heston_call_put",
+    "heston_smile_prices",
+]
 
 def heston_charfunc(u, T, r, kappa, theta, sigma, v0, rho, S0=1.0):
     """
@@ -151,3 +156,134 @@ def heston_call_put(S0, K, T, r, kappa, theta, sigma, v0, rho, N=4096, L=12, **k
     c = heston_price(S0, K, T, r, kappa, theta, sigma, v0, rho, option="call", N=N, L=L, **kwargs)
     p = c - S0 + K * np.exp(-r*T)
     return c, p
+
+
+def heston_smile_prices(
+    S0,
+    r,
+    q,
+    T,
+    strikes,
+    *,
+    kappa,
+    theta,
+    sigma,
+    v0,
+    rho,
+    N: int = 1536,
+    L: float = 12.0,
+    option: str = "call",
+):
+    """
+    Vectorized Heston smile pricer using strike-centered COS over y = ln(S_T) - ln(K).
+
+    Supports continuous dividend yield via the transformation S0' = S0 * exp(-q T),
+    which is equivalent to using drift r in the COS formula with S0'. Parity under
+    dividends is c - p = S0*exp(-qT) - K*exp(-rT).
+
+    Parameters
+    ----------
+    S0 : float
+    r : float
+    q : float
+    T : float
+    strikes : array-like
+    kappa, theta, sigma, v0, rho : Heston parameters
+    N : int
+        Number of COS terms (k = 0..N-1)
+    L : float
+        Truncation width multiplier
+    option : str
+        "call" or "put"
+
+    Returns
+    -------
+    prices : np.ndarray, shape (len(strikes),)
+    """
+    strikes = np.asarray(strikes, dtype=float).reshape(-1)
+    if T <= 0:
+        if option == "call":
+            return np.maximum(S0 - strikes, 0.0)
+        else:
+            return np.maximum(strikes - S0, 0.0)
+
+    # Dividend handling via S0' and r (see docstring)
+    S0_eff = float(S0) * np.exp(-float(q) * float(T))
+    r = float(r)
+    T = float(T)
+
+    # Cumulants for X = ln S_T using S0_eff and drift r
+    c1_x, c2_x = _cumulants_x(T, r, kappa, theta, sigma, v0, rho, S0_eff)
+    std2 = float(abs(c2_x))
+
+    # Fallback to BS in near-constant-variance regime (use average variance ~ theta)
+    is_classic_cv = (sigma <= 1e-3 and abs(v0 - theta) <= 1e-8 and abs(rho) <= 1e-6 and kappa >= 5.0)
+    is_degenerate = std2 < 1e-6
+    if is_classic_cv or is_degenerate:
+        from .black_scholes import black_scholes_price
+        iv = np.sqrt(max(theta, 0.0))
+        if option == "call":
+            return np.array([black_scholes_price(S0_eff, K, T, r, iv, option_type="call") for K in strikes], dtype=float)
+        else:
+            return np.array([black_scholes_price(S0_eff, K, T, r, iv, option_type="put") for K in strikes], dtype=float)
+
+    std = np.sqrt(max(1e-8, std2))
+    width = 2.0 * L * std  # (b - a), constant across strikes
+
+    # Frequency grid
+    k = np.arange(int(N))
+    u = k * np.pi / width  # u[0] = 0
+    den = 1.0 + u*u
+    nz = u != 0.0
+
+    # phi_x(u) once, and shared strike-independent phase shift
+    phi_x = heston_charfunc(u, T, r, kappa, theta, sigma, v0, rho, S0=S0_eff)
+    phase = np.exp(-1j * u * (c1_x - L*std))  # shared across strikes
+    phi_shared = phi_x * phase  # shape (N,)
+
+    # Common W-dependent cos/sin (W = width)
+    cosWu = np.cos(u * width)
+    sinWu = np.sin(u * width)
+
+    # Per-strike a = c1_y - L*std with c1_y = c1_x - ln K
+    lnK = np.log(np.maximum(strikes, 1e-300))
+    a = (c1_x - lnK) - L*std  # shape (M,)
+    exp_a = np.exp(a)
+    alpha = np.maximum(0.0, -a)  # alpha = -a if a<=0 else 0
+    exp_c = np.where(a > 0.0, exp_a, 1.0)  # exp(c) with c = max(0,a)
+
+    # Broadcast to (M, N)
+    u_row = u[None, :]
+    den_row = den[None, :]
+    alpha_col = alpha[:, None]
+    exp_a_col = exp_a[:, None]
+    exp_c_col = exp_c[:, None]
+
+    # psi: handle u=0 via definition (d-c)
+    psi_num = (sinWu[None, :] - np.sin(u_row * alpha_col))  # for a>0, alpha=0 => sin(0)=0
+    psi = np.empty_like(psi_num)
+    # u != 0
+    psi[:, nz] = psi_num[:, nz] / u_row[:, nz]
+    # u == 0 => d - c = (a + width) - max(0, a)
+    d_minus_c = (a + width) - np.maximum(0.0, a)
+    psi[:, ~nz] = d_minus_c[:, None]
+
+    # chi
+    termW = (cosWu[None, :] + u_row * sinWu[None, :])
+    num = (np.exp(width) * exp_a_col) * termW - (np.cos(u_row * alpha_col) + u_row * np.sin(u_row * alpha_col)) * exp_c_col
+    chi = num / den_row
+
+    # Vk
+    Vk = (2.0 / width) * (chi - psi)
+    Vk[:, 0] *= 0.5  # k=0 term half-weight
+
+    # Price = DF * K * Re(sum_k phi_shared * Vk)
+    DF = np.exp(-r * T)
+    accum = np.real(Vk @ phi_shared)
+    prices = DF * strikes * accum
+
+    if option == "call":
+        return prices.astype(float)
+    else:
+        # put via parity with dividends: p = c - S0*e^{-qT} + K e^{-rT}
+        return (prices - S0_eff + strikes * DF).astype(float)

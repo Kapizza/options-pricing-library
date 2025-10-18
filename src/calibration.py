@@ -29,6 +29,11 @@ from src.rough import (
     rough_heston_terminal_parallel_pool,
     rough_heston_euro_mc,
 )
+from src.heston import heston_smile_prices
+
+_VEGA_WEIGHT_SCHEME = "v3_floor0.25_cap4_normmean_wing0.35_p1"
+_VEGA_WEIGHT_FLOOR = 0.25
+_VEGA_WEIGHT_CAP = 4.0
 
 # -----------------------------
 # Generic caching infrastructure
@@ -67,6 +72,68 @@ def _apply_supported_kwargs(fn, base_kwargs: dict, extra: dict | None):
                 out[k] = v
     return out
 
+def _vega_weight_array(
+    S0, r, q, T, strikes, ivs,
+    floor: float = _VEGA_WEIGHT_FLOOR,
+    cap: float | None = _VEGA_WEIGHT_CAP,
+    wing_boost_alpha: float | None = 0.35,
+    wing_boost_power: float | None = 1.0,
+):
+    if ivs is None:
+        return None
+    strikes = np.asarray(strikes, dtype=float)
+    ivs = np.asarray(ivs, dtype=float)
+    vega = np.full_like(strikes, np.nan, dtype=float)
+    for idx, (K, sig) in enumerate(zip(strikes, ivs)):
+        if not np.isfinite(sig):
+            continue
+        try:
+            vega[idx] = bs_vega(S0, float(K), T, r, float(sig), q=q)
+        except Exception:
+            vega[idx] = np.nan
+
+    mask = np.isfinite(vega)
+    if not np.any(mask):
+        return None
+
+    weights = np.abs(vega[mask])
+    scale = np.percentile(weights, 75)
+    if not np.isfinite(scale) or scale <= 1e-8:
+        scale = np.nanmean(weights)
+    if not np.isfinite(scale) or scale <= 1e-8:
+        scaled = np.ones_like(weights)
+    else:
+        scaled = weights / scale
+
+    mean_val = np.nanmean(scaled)
+    if np.isfinite(mean_val) and mean_val > 1e-8:
+        scaled = scaled / mean_val
+
+    # Wing emphasis using |log(K/F)|^p
+    if wing_boost_alpha is not None and float(wing_boost_alpha) > 0.0:
+        try:
+            F = float(S0) * math.exp((float(r) - float(q)) * float(T))
+        except Exception:
+            F = float(S0)
+        m = np.zeros_like(vega[mask])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            m = np.abs(np.log(np.asarray(strikes, float)[mask] / F))
+        pwr = float(wing_boost_power or 1.0)
+        boost = 1.0 + float(wing_boost_alpha) * np.power(m, pwr)
+        boost = np.clip(boost, 1.0, 1e3)
+        scaled = scaled * boost
+
+    if floor is not None and float(floor) > 0.0:
+        floor_val = float(floor)
+        scaled = np.maximum(scaled, floor_val)
+    if cap is not None and float(cap) > 0.0:
+        cap_val = float(cap)
+        scaled = np.minimum(scaled, cap_val)
+
+    out = np.zeros_like(strikes, dtype=float)
+    out[mask] = scaled
+    return out
+
 def calibrate_cached(
     model: str,
     calibrate_fn,
@@ -99,6 +166,7 @@ def calibrate_cached(
         smiles=smiles,
         metric=metric,
         vega_weight=vega_weight,
+        vega_weight_scheme=_VEGA_WEIGHT_SCHEME,
         x0=x0,
         mc=mc,
         seed=seed,
@@ -382,10 +450,9 @@ def calibrate_rbergomi(
     if vega_weight and metric == "iv":
         weights = {}
         for (S0, r, q, T, strikes, mids, cp, mkt_iv) in dat:
-            ivs = mkt_iv
-            vega = np.array([bs_vega(S0, K, T, r, sig, q=q) for K, sig in zip(strikes, ivs)])
-            w = vega / max(1e-8, np.percentile(vega, 75))
-            weights[T] = w
+            w = _vega_weight_array(S0, r, q, T, strikes, mkt_iv)
+            if w is not None:
+                weights[T] = w
 
     b = Bounds([bounds[0][0], bounds[1][0], bounds[2][0], bounds[3][0]],
                [bounds[0][1], bounds[1][1], bounds[2][1], bounds[3][1]])
@@ -542,6 +609,8 @@ def calibrate_rough_heston(
     multistart: int = 3,
     verbose: bool = True,
     print_every: int = 1,
+    wing_boost_alpha: float | None = 0.35,
+    wing_boost_power: float | None = 1.0,
 ):
     """
     Calibrate rough Heston (v0, kappa, theta, eta, rho, H) to one or more smiles.
@@ -581,10 +650,13 @@ def calibrate_rough_heston(
     if vega_weight and metric == "iv":
         weights = {}
         for (S0, r, q, T, strikes, mids, cp, mkt_iv) in dat:
-            ivs = mkt_iv
-            vega = np.array([bs_vega(S0, K, T, r, sig, q=q) for K, sig in zip(strikes, ivs)])
-            w = vega / max(1e-8, np.percentile(vega, 75))
-            weights[T] = w
+            w = _vega_weight_array(
+                S0, r, q, T, strikes, mkt_iv,
+                wing_boost_alpha=wing_boost_alpha,
+                wing_boost_power=wing_boost_power,
+            )
+            if w is not None:
+                weights[T] = w
 
     b = Bounds([b[0] for b in bounds], [b[1] for b in bounds])
 
@@ -630,3 +702,228 @@ def calibrate_rough_heston(
     out = dict(v0=p[0], kappa=p[1], theta=p[2], eta=p[3], rho=p[4], H=p[5],
                obj=best.fun, success=best.success, nit=best.nit, history=best_hist)
     return out, best
+
+
+# =============================== Heston ===============================
+
+def _heston_eval_one(sm, params, metric, weights, mc):
+    (S0, r, q, T, strikes, mids, cp, mkt_iv_opt) = sm
+    (v0, kappa, theta, sigma, rho) = params
+    N = int(mc.get("cos_N", 1536))
+    L = float(mc.get("cos_L", 12.0))
+
+    try:
+        model_px = heston_smile_prices(
+            S0, r, q, T, strikes,
+            kappa=kappa, theta=theta, sigma=sigma, v0=v0, rho=rho,
+            N=N, L=L, option=cp,
+        )
+    except Exception:
+        return math.inf
+
+    if metric == "price":
+        resid = model_px - mids
+        if weights is not None and T in weights:
+            w = np.asarray(weights[T], float)
+            mask = np.isfinite(resid) & np.isfinite(w)
+            resid = resid[mask] * w[mask]
+        else:
+            mask = np.isfinite(resid)
+            resid = resid[mask]
+    else:
+        mod_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, model_px)])
+        mkt_iv = mkt_iv_opt
+        mask = np.isfinite(mod_iv)
+        if mkt_iv is not None:
+            mkt_iv = np.asarray(mkt_iv, float)
+            mask &= np.isfinite(mkt_iv)
+        if weights is not None and T in weights:
+            w = np.asarray(weights[T], float)
+            mask &= np.isfinite(w)
+        else:
+            w = None
+        if not np.any(mask):
+            return math.inf
+        resid = mod_iv[mask] - mkt_iv[mask]
+        if w is not None:
+            resid = resid * w[mask]
+        mask_resid = np.isfinite(resid)
+        resid = resid[mask_resid]
+    if resid.size == 0:
+        return math.inf
+    return float(resid @ resid)
+
+
+def _heston_objective(params, data, metric, weights, mc, exec_ctx=None):
+    # params = [v0, kappa, theta, sigma, rho]
+    v0, kappa, theta, sigma, rho = params
+    eps = 1e-8
+    if rho <= -0.999:
+        rho = -0.999 + eps
+    elif rho >= 0.999:
+        rho = 0.999 - eps
+    if v0 <= 0 or theta <= 0 or sigma <= 0 or kappa <= 0 or not (-0.999 < rho < 0.999):
+        return 1e6
+
+    params_tup = tuple(float(x) for x in (v0, kappa, theta, sigma, rho))
+
+    if exec_ctx is None:
+        err2 = 0.0
+        for sm in data:
+            e = _heston_eval_one(sm, params_tup, metric, weights, mc)
+            if not np.isfinite(e):
+                return 1e6
+            err2 += e
+    else:
+        futs = [exec_ctx.submit(_heston_eval_one, sm, params_tup, metric, weights, mc) for sm in data]
+        err2 = 0.0
+        for f in futs:
+            e = f.result()
+            if not np.isfinite(e):
+                return 1e6
+            err2 += e
+
+    if not np.isfinite(err2):
+        return 1e6
+    return err2
+
+
+def calibrate_heston(
+    smiles: List[Tuple],
+    metric: str = "iv",
+    vega_weight: bool = True,
+    bounds=((1e-4, 0.5), (0.05, 8.0), (1e-4, 0.5), (0.02, 2.5), (-0.999, -0.01)),  # v0, kappa, theta, sigma, rho
+    x0=(0.04, 1.5, 0.04, 1.0, -0.7),
+    mc=dict(cos_N=1536, cos_L=12.0, n_workers=0),
+    seed: int | None = None,  # unused, for API consistency
+    n_workers: int | None = None,
+    parallel_backend: str = "process",
+    options=None,
+    multistart: int = 2,
+    verbose: bool = True,
+    print_every: int = 1,
+):
+    """
+    Calibrate classic Heston (v0, kappa, theta, sigma, rho) to one or more smiles.
+    smiles: list of (S0, r, q, T, strikes, mids, cp)
+    """
+    # Merge worker override
+    mc = dict(mc)
+    if n_workers is not None:
+        mc["n_workers"] = int(n_workers)
+
+    # Prepare data and precompute market IVs
+    dat = []
+    for (S0, r, q, T, strikes, mids, cp) in smiles:
+        if metric == "iv":
+            mkt_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, mids)])
+        else:
+            mkt_iv = None
+        dat.append((S0, r, q, T, np.asarray(strikes, float), np.asarray(mids, float), cp, mkt_iv))
+
+    weights = None
+    if vega_weight and metric == "iv":
+        weights = {}
+        for (S0, r, q, T, strikes, mids, cp, mkt_iv) in dat:
+            w = _vega_weight_array(S0, r, q, T, strikes, mkt_iv)
+            if w is not None:
+                weights[T] = w
+
+    b = Bounds([b[0] for b in bounds], [b[1] for b in bounds])
+
+    # Multistart guesses
+    best = None
+    rng = np.random.default_rng(3101)
+    starts = [np.array(x0, dtype=float)]
+    for _ in range(max(0, multistart - 1)):
+        # perturbations scaled by typical sensitivity
+        noise = np.array([0.2, 0.2, 0.2, 0.25, 0.05]) * (rng.random(5) - 0.5)
+        starts.append(np.clip(starts[0] * (1.0 + noise), b.lb, b.ub))
+
+    best_hist = None
+    for i, guess in enumerate(starts, 1):
+        tag = f"Heston #{i}"
+        mon = _CalibMonitor(tag=tag, print_every=print_every, verbose=verbose)
+
+        max_workers = int(mc.get("n_workers", 0) or 0)
+        if max_workers <= 1:
+            # No pool
+            obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=None)
+            obj_wrapped = mon.wrap_obj(obj)
+            mon.start(start_idx=i)
+            _opt = {"maxiter": 200, "disp": False}
+            if options:
+                _opt.update(options)
+            if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
+                _opt["finite_diff_rel_step"] = 5e-2
+            res = minimize(
+                obj_wrapped,
+                x0=np.array(guess),
+                method="L-BFGS-B",
+                bounds=b,
+                options=_opt,
+                callback=mon.cb,
+            )
+            mon.done(label="best")
+            res.history = mon.history
+        else:
+            Executor = ThreadPoolExecutor if str(parallel_backend).lower().startswith("thread") else ProcessPoolExecutor
+            with Executor(max_workers=max_workers) as ex:
+                obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=ex)
+                obj_wrapped = mon.wrap_obj(obj)
+                mon.start(start_idx=i)
+                _opt = {"maxiter": 200, "disp": False}
+                if options:
+                    _opt.update(options)
+                if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
+                    _opt["finite_diff_rel_step"] = 5e-2
+                res = minimize(
+                    obj_wrapped,
+                    x0=np.array(guess),
+                    method="L-BFGS-B",
+                    bounds=b,
+                    options=_opt,
+                    callback=mon.cb,
+                )
+                mon.done(label="best")
+                res.history = mon.history
+
+        if (best is None) or (res.fun < best.fun):
+            best = res
+            best_hist = mon.history
+
+    p = best.x
+    out = dict(v0=p[0], kappa=p[1], theta=p[2], sigma=p[3], rho=p[4],
+               obj=best.fun, success=best.success, nit=best.nit, history=best_hist)
+    return out, best
+
+
+def calibrate_heston_cached(
+    *,
+    smiles,
+    metric: str = "iv",
+    vega_weight: bool = True,
+    x0=(0.04, 1.5, 0.04, 1.0, -0.7),
+    mc=dict(cos_N=1536, cos_L=12.0, n_workers=0),
+    seed=None,
+    bounds=((1e-4, 0.5), (0.05, 8.0), (1e-4, 0.5), (0.02, 2.5), (-0.999, -0.01)),
+    multistart=2,
+    options=None,
+    cache_dir: str | None = None,
+    runtime_overrides: dict | None = None,
+):
+    return calibrate_cached(
+        model="heston",
+        calibrate_fn=calibrate_heston,
+        smiles=smiles,
+        metric=metric,
+        vega_weight=vega_weight,
+        x0=x0,
+        mc=mc,
+        seed=seed,
+        bounds=bounds,
+        multistart=multistart,
+        options=options,
+        cache_dir=cache_dir,
+        runtime_overrides=runtime_overrides,
+    )
