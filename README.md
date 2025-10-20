@@ -10,7 +10,8 @@ This project is designed as an educational and demonstrational toolkit for quant
 
 For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma, and the Black–Scholes model:
 
-notebooks/00_Theory-CLT-ITO-BS.ipynb
+**[`notebooks/00_Theory-CLT-ITO-BS.ipynb`](notebooks/00_Theory-CLT-ITO-BS.ipynb)**
+
 
 ---
 
