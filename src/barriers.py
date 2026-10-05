@@ -18,7 +18,9 @@ References
 
 Notes
 - Knock-in price is computed by parity: price_in = vanilla - price_out
-- Rebate is a fixed cash amount paid at the detected hit time
+  (parity on the rebate-free knock-out)
+- Rebate is a fixed cash amount: for knock-outs it is paid at the detected
+  hit time; for knock-ins it is paid at expiry if the barrier is never hit
 - Antithetic variates are available for variance reduction
 """
 
@@ -206,33 +208,29 @@ def barrier_price_mc(
         payoff = np.maximum(K - ST, 0.0)
 
     is_out = barrier in ("up-and-out", "down-and-out")
+    n_total = payoff.shape[0]
 
-    if is_out:
-        alive_mask = ~hit_any
-        if np.any(alive_mask):
-            discounted_payoff = _discount(payoff[alive_mask], r, T)
-            price_out = float(np.mean(discounted_payoff))
-        else:
-            price_out = 0.0
-        if rebate > 0.0 and np.any(hit_any):
-            disc_rebate = _discount(rebate, r, first_hit_time[hit_any])
-            price_out += float(np.mean(disc_rebate))
-        return price_out
-
-    # Knock-in via parity
-    vanilla = black_scholes_price(S0, K, T, r, sigma, option_type=option, q=q)
-
+    # Expectations are over ALL paths: E[payoff * 1{alive}], not E[payoff | alive].
     alive_mask = ~hit_any
     if np.any(alive_mask):
-        discounted_payoff_out = _discount(payoff[alive_mask], r, T)
-        price_out = float(np.mean(discounted_payoff_out))
+        discounted_payoff = _discount(payoff[alive_mask], r, T)
+        price_out = float(np.sum(discounted_payoff) / n_total)
     else:
         price_out = 0.0
-    if rebate > 0.0 and np.any(hit_any):
-        disc_rebate = _discount(rebate, r, first_hit_time[hit_any])
-        price_out += float(np.mean(disc_rebate))
 
+    if is_out:
+        if rebate > 0.0 and np.any(hit_any):
+            disc_rebate = _discount(rebate, r, first_hit_time[hit_any])
+            price_out += float(np.sum(disc_rebate) / n_total)
+        return price_out
+
+    # Knock-in via parity on the rebate-free knock-out
+    vanilla = black_scholes_price(S0, K, T, r, sigma, option_type=option, q=q)
     price_in = float(vanilla - price_out)
+
+    # Knock-in rebate is paid at expiry on paths that never hit the barrier
+    if rebate > 0.0 and np.any(alive_mask):
+        price_in += float(rebate * math.exp(-r * T) * np.sum(alive_mask) / n_total)
     return price_in
 
 
