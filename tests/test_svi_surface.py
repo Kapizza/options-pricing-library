@@ -20,8 +20,12 @@ def _make_synthetic_chain_iv(S0, r, q, T, K):
     """
     F = S0 * math.exp((r - q) * T)
     k = np.log(K / F)
-    # A mild, realistic SVI set
-    true = SVIParams(a=0.015, b=0.75, rho=-0.45, m=0.0, sigma=0.22)
+    # A mild, realistic SVI set. b was 0.75, which has butterfly arbitrage:
+    # g(k) < 0 for k in [-1.31, -0.38], and the Breeden-Litzenberger density
+    # from these IVs is negative for K in [27, 69] at T=0.5 (F=101). An
+    # arbitrage-free fitter cannot reproduce it (best arbitrage-free rmse 2.3e-3).
+    # b=0.6 is the nearest arbitrage-free slice with a, rho, m, sigma unchanged.
+    true = SVIParams(a=0.015, b=0.6, rho=-0.45, m=0.0, sigma=0.22)
     w = svi_total_variance(k, true)
     iv = np.sqrt(np.maximum(w, 1e-12) / max(T, 1e-8))
     return iv, true
@@ -182,3 +186,56 @@ def test_fit_from_prices_with_dividend_yield():
     p = fit_svi_expiry_from_prices(S0, r, q, T, K, calls)
     iv_fit = np.sqrt(svi_total_variance(k, p) / T)
     assert np.max(np.abs(iv_fit - iv_true)) < 2e-3
+
+
+# ---------------------------------------------------------------------------
+# Regression: butterfly (density) no-arbitrage, Gatheral & Jacquier (2014)
+# g(k) = (1 - k w'/(2w))^2 - w'^2/4 (1/w + 1/4) + w''/2 >= 0
+# ---------------------------------------------------------------------------
+from src.svi_surface import svi_butterfly_g
+
+# Gatheral & Jacquier (2014), Example 3.1 (Axel Vogt): a raw SVI slice with
+# butterfly arbitrage, T = 1.
+_VOGT = SVIParams(a=-0.0410, b=0.1331, rho=0.3060, m=0.3586, sigma=0.4153)
+
+
+def test_butterfly_g_flags_known_arbitrage():
+    k = np.linspace(-1.5, 1.5, 601)
+    assert svi_butterfly_g(k, _VOGT).min() < -0.02
+    good = SVIParams(a=0.04, b=0.4, rho=-0.4, m=0.0, sigma=0.2)
+    assert svi_butterfly_g(k, good).min() > 0.0
+
+
+@pytest.mark.parametrize("case", ["vogt", "repo_smile"])
+def test_fitted_slices_are_butterfly_free(case):
+    if case == "vogt":
+        T, F = 1.0, 100.0
+        k = np.linspace(-1.5, 1.5, 61)
+        iv = np.sqrt(svi_total_variance(k, _VOGT) / T)
+    else:   # a smile with arbitrage just outside the quoted strikes (k < -0.38)
+        T, F = 0.5, 100.0 * math.exp(0.02 * 0.5)
+        k = np.log(np.linspace(70, 130, 31) / F)
+        bad = SVIParams(a=0.015, b=0.75, rho=-0.45, m=0.0, sigma=0.22)
+        iv = np.sqrt(svi_total_variance(k, bad) / T)
+    p = fit_svi_expiry_from_ivs(F * np.exp(k), iv, T, F)
+    kk = np.linspace(k.min() - 1.0, k.max() + 1.0, 801)
+    assert svi_butterfly_g(kk, p).min() >= -1e-6
+    assert p.b * (1.0 + abs(p.rho)) <= 2.0 + 1e-9            # Roger Lee wing bound
+    # still close where there is data (best arbitrage-free rmse for the
+    # repo_smile case is 2.3e-3 by an independent SLSQP fit)
+    w_fit = svi_total_variance(k, p)
+    assert np.sqrt(np.mean((w_fit - iv ** 2 * T) ** 2)) < 3e-3
+
+
+def test_surface_butterfly_check():
+    np.random.seed(5)
+    S0, r, q = 100.0, 0.02, 0.0
+    chains = {}
+    for T in (0.1, 0.25, 0.5, 1.0):
+        K = np.linspace(70, 130, 41)
+        iv, _ = _make_synthetic_chain_iv(S0, r, q, T, K)
+        chains[T] = {"K": K, "iv": iv}
+    surf = fit_svi_surface(chains, S0=S0, r=r, q=q, mode="iv")
+    g = surf.butterfly_g()
+    assert g.shape == surf.w_grid.shape
+    assert np.nanmin(g[:, 2:-2]) >= -1e-3

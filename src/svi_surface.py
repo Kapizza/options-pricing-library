@@ -19,6 +19,7 @@
 # -----------------------------------------------------------------------------
 
 import math
+import warnings
 import numpy as np
 from dataclasses import dataclass
 from functools import lru_cache
@@ -49,6 +50,23 @@ def svi_total_variance(k_array, p):
     k = np.asarray(k_array, dtype=float)
     x = k - p.m
     return p.a + p.b * (p.rho * x + np.sqrt(x * x + p.sigma * p.sigma))
+
+
+def svi_butterfly_g(k_array, p):
+    """
+    Gatheral & Jacquier (2014) density function for a raw-SVI slice:
+        g(k) = (1 - k w'/(2w))^2 - (w'^2/4) (1/w + 1/4) + w''/2.
+    The slice is free of butterfly arbitrage iff g(k) >= 0 for all k
+    (together with the Roger Lee wing bound b(1 + |rho|) <= 2).
+    """
+    k = np.asarray(k_array, dtype=float)
+    x = k - p.m
+    sq = np.sqrt(x * x + p.sigma * p.sigma)
+    w = p.a + p.b * (p.rho * x + sq)
+    w1 = p.b * (p.rho + x / sq)
+    w2 = p.b * p.sigma * p.sigma / sq ** 3
+    w = np.maximum(w, 1e-300)
+    return (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
 
 
 def _feasible_raw_svi(p, eps=1e-12):
@@ -178,16 +196,30 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
         denom = (d1 - d0) if abs(d1 - d0) > 1e-10 else 1e-10
         return max(1e-4, (w_hi - w_lo) / denom)
 
+    # Butterfly no-arbitrage is enforced by a penalty: g(k) >= 0 on the data
+    # range +- 1 in log-moneyness, and the Roger Lee wing bound
+    # b (1 + |rho|) <= 2, which makes g >= 0 asymptotically.
+    # A small margin keeps g >= 0 between the grid points as well.
+    k_arb = np.linspace(k.min() - 2.0, k.max() + 2.0, 1201)
+    g_margin = 1e-4
+    arb_weight = 1e3
+
+    def arb_penalty(p):
+        g = svi_butterfly_g(k_arb, p)
+        viol = np.minimum(g - g_margin, 0.0)
+        lee = max(0.0, p.b * (1.0 + abs(p.rho)) - 2.0)
+        return arb_weight * (float(np.mean(viol * viol)) + lee * lee)
+
     def loss_huber_theta(theta):
         p = _map_unconstrained_to_svi(theta)
         w = svi_total_variance(k, p)
-        return float(np.mean(_huber(w - w_tgt, huber_delta)))
+        return float(np.mean(_huber(w - w_tgt, huber_delta))) + arb_penalty(p)
 
     def loss_mse_theta(theta):
         p = _map_unconstrained_to_svi(theta)
         w = svi_total_variance(k, p)
         r = w - w_tgt
-        return float(np.mean(r * r))
+        return float(np.mean(r * r)) + arb_penalty(p)
 
     # --- starts: grid + jitters ---
     rng = np.random.RandomState(42)
@@ -251,7 +283,7 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
         p_loc = _map_unconstrained_to_svi([c, beta, rho_tilde, m_uncon, s_uncon])
         w = svi_total_variance(k, p_loc)
         r = w - w_tgt
-        return float(np.mean(r * r))
+        return float(np.mean(r * r)) + arb_penalty(p_loc)
 
     # bracket around current c
     c0 = float(theta[0])
@@ -261,10 +293,31 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
     theta[0] = float(res_c.x)
     p = _map_unconstrained_to_svi(theta)
 
-    # Convexity safeguard
-    kk = np.linspace(k.min() - 0.5, k.max() + 0.5, 121)
-    if not _numeric_convex(svi_total_variance(kk, p), kk):
-        p = SVIParams(p.a, p.b, 0.92 * p.rho, p.m, 1.12 * p.sigma)
+    # Hard constraint: if the penalised fit still violates g >= 0 or the Lee
+    # bound, polish with SLSQP under explicit inequality constraints.
+    if np.min(svi_butterfly_g(k_arb, p)) < g_margin or p.b * (1.0 + abs(p.rho)) > 2.0:
+        unpack = lambda x: SVIParams(x[0], x[1], x[2], x[3], x[4])
+        cons = [
+            {"type": "ineq", "fun": lambda x: svi_butterfly_g(k_arb, unpack(x)) - g_margin},
+            {"type": "ineq", "fun": lambda x: 2.0 - x[1] * (1.0 + abs(x[2]))},
+            {"type": "ineq", "fun": lambda x: x[0] + x[1] * x[4] * math.sqrt(max(0.0, 1.0 - x[2] ** 2))},
+        ]
+        res_c = minimize(
+            lambda x: float(np.mean((svi_total_variance(k, unpack(x)) - w_tgt) ** 2)),
+            np.array([p.a, p.b, p.rho, p.m, p.sigma]), method="SLSQP", constraints=cons,
+            bounds=[(None, None), (1e-10, None), (-0.999, 0.999), (None, None), (1e-8, None)],
+            options=dict(maxiter=500, ftol=1e-15),
+        )
+        p = unpack(res_c.x)
+
+    # Butterfly check (raw SVI with b >= 0 is always convex in k, so convexity
+    # of w is not the relevant test; g(k) is)
+    g_min = float(np.min(svi_butterfly_g(k_arb, p)))
+    if g_min < -1e-6 or p.b * (1.0 + abs(p.rho)) > 2.0 + 1e-9:
+        warnings.warn(
+            f"SVI fit at T={T:.4f} retains butterfly arbitrage (min g = {g_min:.2e})",
+            RuntimeWarning,
+        )
 
     return p
 
@@ -315,6 +368,21 @@ class SVISurface:
         w_T = np.vstack(w_T)  # (M, len(k))
         fT = interp1d(self.tenors, w_T, axis=0, kind="linear", fill_value="extrapolate")
         return fT(float(T))
+
+    def butterfly_g(self):
+        """
+        Gatheral-Jacquier g(k) on the stitched grid, per tenor (finite
+        differences in k); shape (M, len(k_grid)). Values >= 0 mean no
+        butterfly arbitrage. The two edge points of each row are not reliable.
+        """
+        k = self.k_grid
+        g = np.empty_like(self.w_grid)
+        for m in range(len(self.tenors)):
+            w = np.maximum(self.w_grid[m], 1e-300)
+            w1 = np.gradient(w, k)
+            w2 = np.gradient(w1, k)
+            g[m] = (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
+        return g
 
     def iv(self, k_array, T):
         """
