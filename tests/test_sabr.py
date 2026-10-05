@@ -203,3 +203,15 @@ def test_sabr_iv_atm_beta_one_closed_form(rho, nu):
     assert abs(sabr_iv(F, F, T, alpha, 1.0, rho, nu) - expected) < 1e-14
     # and continuity just off ATM
     assert abs(sabr_iv(F, F * (1 + 1e-7), T, alpha, 1.0, rho, nu) - expected) < 1e-7
+
+
+def test_calibration_uses_no_deprecated_scipy_options():
+    # SciPy 1.17 deprecates (1.18 removes) the L-BFGS-B `disp`/`iprint` options.
+    import warnings
+    F, T = 100.0, 0.5
+    Ks = np.array([90.0, 100.0, 110.0])
+    ivs = np.array([sabr_iv(F, K, T, 0.3, 0.7, -0.3, 0.5) for K in Ks])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        sabr_calibrate_iv(Ks, np.full(3, T), ivs, F, beta=0.7, maxiter=5)
+        sabr_calibrate_iv(Ks, np.full(3, T), ivs, F, beta=0.7, maxiter=5, disp=True)

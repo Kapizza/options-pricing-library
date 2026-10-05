@@ -205,3 +205,15 @@ def test_mc_calibrators_use_relative_fd_steps(model, monkeypatch):
         assert moved.size == 1
         i = moved[0]
         assert 0.04 < abs(p[i] - x0[i]) / abs(x0[i]) < 0.06
+
+
+def test_heston_calibration_uses_no_deprecated_scipy_options():
+    import warnings
+    from src.calibration import calibrate_heston
+    from src.heston import heston_smile_prices
+    K = np.array([90.0, 100.0, 110.0])
+    mids = heston_smile_prices(100.0, 0.01, 0.0, 0.5, K, kappa=2.0, theta=0.04, sigma=0.5, v0=0.04, rho=-0.6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        calibrate_heston([(100.0, 0.01, 0.0, 0.5, K, mids, "call")], metric="price", vega_weight=False,
+                         multistart=1, options={"maxiter": 2}, verbose=False)

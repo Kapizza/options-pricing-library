@@ -108,7 +108,7 @@ def sabr_calibrate_iv(K, T, iv_mkt, F, w=None, beta=None, x0=None, bounds=None, 
             d = iv_model - iv_mkt
             return float(np.mean(w * d * d))
 
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter, disp=disp))
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter))  # `disp` is ignored (removed from SciPy L-BFGS-B)
         return dict(alpha=res.x[0], beta=res.x[1], rho=res.x[2], nu=res.x[3]), res
     else:
         bfix = float(beta)
@@ -126,7 +126,7 @@ def sabr_calibrate_iv(K, T, iv_mkt, F, w=None, beta=None, x0=None, bounds=None, 
             d = iv_model - iv_mkt
             return float(np.mean(w * d * d))
 
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter, disp=disp))
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter))  # `disp` is ignored (removed from SciPy L-BFGS-B)
         return dict(alpha=res.x[0], beta=bfix, rho=res.x[1], nu=res.x[2]), res
 
 # -----------------------------

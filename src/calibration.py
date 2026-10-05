@@ -490,7 +490,7 @@ def calibrate_rbergomi(
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
             # Make finite-diff steps large enough relative to parameter scales by default
-            _opt = {"maxiter": 200, "disp": False}
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
@@ -693,7 +693,7 @@ def calibrate_rough_heston(
             obj = lambda x: _rough_heston_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            _opt = {"maxiter": 200, "disp": False}
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
@@ -867,7 +867,7 @@ def calibrate_heston(
             obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=None)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            _opt = {"maxiter": 200, "disp": False}
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
@@ -888,7 +888,7 @@ def calibrate_heston(
                 obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=ex)
                 obj_wrapped = mon.wrap_obj(obj)
                 mon.start(start_idx=i)
-                _opt = {"maxiter": 200, "disp": False}
+                _opt = {"maxiter": 200}
                 if options:
                     _opt.update(options)
                 if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
