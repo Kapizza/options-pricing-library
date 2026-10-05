@@ -168,3 +168,38 @@ def test_calibration_price_fixed_beta_recovers_params():
     assert abs(params["rho"]   - rho_t)   < 0.12
     assert abs(params["nu"]    - nu_t)    < 0.12
     assert abs(params["beta"]  - beta_t)  < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Regression: Hagan, Kumar, Lesniewski & Woodward (2002), eq. (2.17a)-(2.17c).
+# Reference values from QuantLib 1.43 `sabrVolatility` (independent code),
+# strikes at F * (0.5, 0.8, 1.0, 1.25, 2.0).
+# ---------------------------------------------------------------------------
+import pytest
+
+_HAGAN_REF = [
+    # F, T, alpha, beta, rho, nu, vols
+    (100.0, 0.5, 0.2, 1.0, -0.5, 0.5, (0.307703510103, 0.232325070605, 0.200052083333, 0.181150706003, 0.203808961751)),
+    (100.0, 2.0, 0.2, 1.0, 0.3, 0.8, (0.310990877848, 0.222293871045, 0.223253333333, 0.269950945792, 0.392617015873)),
+    (100.0, 1.0, 2.0, 0.5, -0.3, 0.4, (0.307333835956, 0.231258864931, 0.20179, 0.184184741635, 0.191311622719)),
+    (100.0, 1.0, 20.0, 0.0, -0.3, 0.4, (0.347244854398, 0.244069837092, 0.20264, 0.174636638338, 0.168719615028)),
+    (0.03, 5.0, 0.035, 0.5, -0.25, 0.45, (0.332135110343, 0.246813235851, 0.215082704892, 0.199336092705, 0.217068118675)),
+    (100.0, 0.75, 1.0, 0.7, -0.4, 0.6, (0.399324304722, 0.295636152891, 0.253541028435, 0.229909487666, 0.253292740251)),
+]
+
+
+@pytest.mark.parametrize("F, T, a, b, rho, nu, vols", _HAGAN_REF)
+def test_sabr_iv_matches_hagan_2002_reference(F, T, a, b, rho, nu, vols):
+    for m, ref in zip((0.5, 0.8, 1.0, 1.25, 2.0), vols):
+        v = sabr_iv(F, F * m, T, a, b, rho, nu)
+        assert abs(v / ref - 1.0) < 1e-9, f"K/F={m}: {v} vs {ref}"
+
+
+@pytest.mark.parametrize("rho, nu", [(-0.5, 0.5), (0.3, 0.8), (0.0, 1.2)])
+def test_sabr_iv_atm_beta_one_closed_form(rho, nu):
+    # beta = 1, K = F: sigma = alpha * (1 + (rho*nu*alpha/4 + (2 - 3 rho^2) nu^2 / 24) T)
+    F, T, alpha = 100.0, 1.5, 0.25
+    expected = alpha * (1.0 + (rho * nu * alpha / 4.0 + (2.0 - 3.0 * rho * rho) * nu * nu / 24.0) * T)
+    assert abs(sabr_iv(F, F, T, alpha, 1.0, rho, nu) - expected) < 1e-14
+    # and continuity just off ATM
+    assert abs(sabr_iv(F, F * (1 + 1e-7), T, alpha, 1.0, rho, nu) - expected) < 1e-7
