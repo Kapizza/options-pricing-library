@@ -425,3 +425,12 @@ def test_rbergomi_matches_exact_cholesky_simulation():
         pay = np.maximum(S[:, -1] - K, 0.0)
         mc, mc_se = pay.mean(), pay.std() / math.sqrt(n)
         assert abs(mc - m) < 4.0 * math.hypot(se, mc_se), f"K={K}: {mc:.4f} vs exact {m:.4f}"
+
+
+def test_xi0_short_array_is_padded_with_last_value():
+    from src.rough import _xi0_as_callable
+    t = np.linspace(0.0, 1.0, 5)
+    f = _xi0_as_callable([0.04, 0.09])
+    assert np.allclose(f(t), [0.04, 0.09, 0.09, 0.09, 0.09])
+    g = _xi0_as_callable([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07])
+    assert np.allclose(g(t), [0.01, 0.02, 0.03, 0.04, 0.05])

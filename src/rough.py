@@ -65,8 +65,11 @@ def _xi0_as_callable(xi0) -> Callable[[np.ndarray], np.ndarray]:
         # broadcast if lengths match
         if x.size == tgrid.size:
             return x.astype(float)
-        # fallback to last value if shorter
-        return np.resize(x.astype(float), tgrid.size)
+        # pad with the last value if shorter, truncate if longer
+        x = x.astype(float).ravel()
+        if x.size < tgrid.size:
+            return np.concatenate([x, np.full(tgrid.size - x.size, x[-1])])
+        return x[:tgrid.size]
     return _f
 
 
