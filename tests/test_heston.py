@@ -37,3 +37,74 @@ def test_strike_monotonicity_calls():
     Ks = [80, 90, 100, 110, 120]
     prices = [heston_price(S0, K, T, r, **params, option="call") for K in Ks]
     assert all(prices[i] >= prices[i+1] - 1e-8 for i in range(len(prices)-1))
+
+
+# ---------------------------------------------------------------------------
+# Regression: accuracy against published and independent reference prices
+# ---------------------------------------------------------------------------
+import math
+import pytest
+from scipy.integrate import quad
+from src.heston import heston_smile_prices
+
+# Fang & Oosterlee (2008), SIAM J. Sci. Comput. 31(2), Heston test case
+_FO = dict(kappa=1.5768, theta=0.0398, sigma=0.5751, v0=0.0175, rho=-0.5711)
+
+
+def _heston_gil_pelaez(S0, K, T, r, q, kappa, theta, sigma, v0, rho):
+    """Independent Heston call price: Gil-Pelaez inversion of the
+    log-price characteristic function (Albrecher et al. 2007 form)."""
+    def cf(u):
+        iu = 1j * u
+        d = np.sqrt((rho * sigma * iu - kappa) ** 2 + sigma ** 2 * (iu + u * u))
+        g = (kappa - rho * sigma * iu - d) / (kappa - rho * sigma * iu + d)
+        e = np.exp(-d * T)
+        C = (iu * (math.log(S0) + (r - q) * T)
+             + kappa * theta / sigma ** 2 * ((kappa - rho * sigma * iu - d) * T
+                                            - 2.0 * np.log((1 - g * e) / (1 - g))))
+        D = (kappa - rho * sigma * iu - d) / sigma ** 2 * (1 - e) / (1 - g * e)
+        return np.exp(C + D * v0)
+
+    lnK = math.log(K)
+    phi_mi = cf(-1j)
+    f1 = lambda u: (np.exp(-1j * u * lnK) * cf(u - 1j) / (1j * u * phi_mi)).real
+    f2 = lambda u: (np.exp(-1j * u * lnK) * cf(u) / (1j * u)).real
+    P1 = 0.5 + quad(f1, 1e-10, 500, limit=2000, epsabs=1e-12)[0] / math.pi
+    P2 = 0.5 + quad(f2, 1e-10, 500, limit=2000, epsabs=1e-12)[0] / math.pi
+    return S0 * math.exp(-q * T) * P1 - K * math.exp(-r * T) * P2
+
+
+@pytest.mark.parametrize("T, ref", [(1.0, 5.785155450), (10.0, 22.318945791474590)])
+def test_fang_oosterlee_reference_values(T, ref):
+    assert abs(heston_price(100.0, 100.0, T, 0.0, **_FO) - ref) < 1e-6
+    assert abs(heston_smile_prices(100.0, 0.0, 0.0, T, [100.0], **_FO)[0] - ref) < 1e-6
+
+
+@pytest.mark.parametrize("q", [0.0, 0.02])
+def test_strike_sweep_matches_independent_integration(q):
+    S0, T, r = 100.0, 0.5, 0.03
+    P = dict(kappa=2.0, theta=0.04, sigma=0.6, v0=0.05, rho=-0.7)
+    Ks = np.array([50.0, 70.0, 90.0, 100.0, 110.0, 130.0, 160.0])
+    ref = np.array([_heston_gil_pelaez(S0, K, T, r, q, **P) for K in Ks])
+    smile = heston_smile_prices(S0, r, q, T, Ks, **P)
+    assert np.max(np.abs(smile - ref)) < 1e-5
+    if q == 0.0:
+        single = np.array([heston_price(S0, K, T, r, **P) for K in Ks])
+        assert np.max(np.abs(single - ref)) < 1e-5
+
+
+@pytest.mark.parametrize("sigma", [0.0, 1e-4, 0.01, 0.05])
+def test_low_vol_of_vol_with_v0_not_theta(sigma):
+    # With v0 != theta the price must reflect the time-averaged variance,
+    # not sqrt(theta). Reference: independent integration (sigma >= 0.01)
+    # or Black-Scholes with the averaged variance (sigma -> 0 limit).
+    S0, K, T, r = 100.0, 100.0, 1.0, 0.0
+    kappa, theta, v0 = 2.0, 0.04, 0.09
+    avg_var = theta + (v0 - theta) * (1.0 - math.exp(-kappa * T)) / (kappa * T)
+    px = heston_price(S0, K, T, r, kappa, theta, sigma, v0, 0.0)
+    if sigma < 1e-3:
+        ref = black_scholes_price(S0, K, T, r, math.sqrt(avg_var), option_type="call")
+        assert abs(px - ref) < 1e-3
+    else:
+        ref = _heston_gil_pelaez(S0, K, T, r, 0.0, kappa, theta, sigma, v0, 0.0)
+        assert abs(px - ref) < 1e-5

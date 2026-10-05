@@ -29,21 +29,30 @@ def heston_charfunc(u, T, r, kappa, theta, sigma, v0, rho, S0=1.0):
     D = ((b - rho*sigma*i*u - d)/(sigma**2)) * ((1 - exp_negdT)/(1 - g*exp_negdT))
     return np.exp(C + D*v0)
 
+def _mean_integrated_variance(T, kappa, theta, v0):
+    """E[int_0^T v_t dt] under Heston: theta*T + (v0 - theta)*(1 - e^{-kappa T})/kappa."""
+    if kappa * T < 1e-10:
+        return v0 * T
+    return theta * T + (v0 - theta) * (-np.expm1(-kappa * T)) / kappa
+
 def _cumulants_x(T, r, kappa, theta, sigma, v0, rho, S0):
     """
-    First two cumulants of X = ln S_T (approx; sufficient for COS truncation).
+    First two cumulants of X = ln S_T, used for the COS truncation range.
+
+    c1 is exact: ln S0 + r T - E[int v dt] / 2.
+    c2 is the exact variance of ln S_T, taken from the characteristic function
+    by a central second difference of log(phi) at u = 0 (step 1e-3). The
+    closed-form c2 printed in Fang & Oosterlee (2008) is about 2% off for their
+    own test parameters and breaks down as kappa -> 0.
     """
-    c1 = (np.log(S0) + r*T
-          - 0.5*theta*T
-          + (theta - v0)*(1 - np.exp(-kappa*T))/(2*kappa)
-          - (rho*sigma*theta/(2*kappa))*(1 - np.exp(-kappa*T)))
-    term1 = (sigma**2) * (1 - np.exp(-kappa*T)) * (
-        v0*(kappa*T - 1 + np.exp(-kappa*T))/(kappa**2)
-        + theta*(T - (2*(1 - np.exp(-kappa*T)))/kappa
-                 + (1 - np.exp(-2*kappa*T))/(2*kappa))
-    )
-    c2 = max(1e-12, term1) / (kappa**2)
-    return c1, c2
+    c1 = np.log(S0) + r*T - 0.5 * _mean_integrated_variance(T, kappa, theta, v0)
+    if sigma < 1e-6:
+        # (near-)deterministic variance: Var(ln S_T) = E[int v dt]
+        return float(c1), max(1e-12, float(_mean_integrated_variance(T, kappa, theta, v0)))
+    h = 1e-3
+    lp = np.log(heston_charfunc(np.array([-h, 0.0, h]), T, r, kappa, theta, sigma, v0, rho, S0=S0))
+    c2 = -float((lp[2] + lp[0] - 2.0 * lp[1]).real) / (h * h)
+    return float(c1), max(1e-12, c2)
 
 def _cos_coefficients_call_y(a, b, k):
     """
@@ -105,9 +114,10 @@ def heston_price(S0, K, T, r, kappa, theta, sigma, v0, rho,
 
     # --- Fallback: near-constant variance => Black–Scholes ---
     is_classic_cv = (sigma <= 1e-3 and abs(v0 - theta) <= 1e-8 and abs(rho) <= 1e-6 and kappa >= 5.0)
-    is_degenerate = std2 < 1e-6  # tiny log-variance ⇒ COS interval collapses
+    is_degenerate = std2 < 1e-6 or sigma < 1e-6  # tiny log-variance or no vol-of-vol
     if is_classic_cv or is_degenerate:
-        iv = np.sqrt(max(theta, 0.0))
+        # sigma -> 0: variance is deterministic, so BS with the time-averaged variance
+        iv = np.sqrt(max(_mean_integrated_variance(T, kappa, theta, v0) / T, 0.0))
         if option == "call":
             return float(black_scholes_price(S0, K, T, r, iv, option_type="call"))
         else:
@@ -218,10 +228,10 @@ def heston_smile_prices(
 
     # Fallback to BS in near-constant-variance regime (use average variance ~ theta)
     is_classic_cv = (sigma <= 1e-3 and abs(v0 - theta) <= 1e-8 and abs(rho) <= 1e-6 and kappa >= 5.0)
-    is_degenerate = std2 < 1e-6
+    is_degenerate = std2 < 1e-6 or sigma < 1e-6
     if is_classic_cv or is_degenerate:
         from .black_scholes import black_scholes_price
-        iv = np.sqrt(max(theta, 0.0))
+        iv = np.sqrt(max(_mean_integrated_variance(T, kappa, theta, v0) / T, 0.0))
         if option == "call":
             return np.array([black_scholes_price(S0_eff, K, T, r, iv, option_type="call") for K in strikes], dtype=float)
         else:
@@ -276,6 +286,8 @@ def heston_smile_prices(
     # Vk
     Vk = (2.0 / width) * (chi - psi)
     Vk[:, 0] *= 0.5  # k=0 term half-weight
+    # Exercise region y >= 0 lies entirely above the window [a, a + width]
+    Vk[(a + width) <= 0.0, :] = 0.0
 
     # Price = DF * K * Re(sum_k phi_shared * Vk)
     DF = np.exp(-r * T)
