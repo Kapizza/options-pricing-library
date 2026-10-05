@@ -18,38 +18,62 @@ For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma,
 ## Features
 
 - Core pricing models
-  - Black–Scholes closed form (with dividend yield `q`)
-  - Binomial Tree (European & American)
+  - Black–Scholes closed form (with dividend yield `q`) and implied volatility
+  - Binomial Tree (European & American, CRR)
   - Monte Carlo simulation
-  - Finite Difference PDE solvers (explicit / implicit / Crank–Nicolson)
+  - Finite Difference PDE solvers (explicit / implicit / Crank–Nicolson); the grid is sized from
+    spot, strike and volatility by default, and the explicit scheme checks its stability bound
   - American options via Longstaff–Schwartz (LSMC)
+  - Merton (1976) jump-diffusion via the COS method
 
 - Stochastic volatility models
-  - Heston via COS method (fast & stable)
-  - SABR (Hagan asymptotic IV) with calibration in IV- and price-space
-  - Rough models: rBergomi and Rough Heston (MC), parallelizable
+  - Heston via the COS method (Fang & Oosterlee 2008), checked against their published reference prices
+  - SABR: Hagan et al. (2002) lognormal implied vol, calibration in IV- and price-space
+    (fix `beta`: alpha and beta are not separately identifiable from a single smile)
+  - Rough models (Monte Carlo, parallelizable): rBergomi with a Riemann–Liouville driver
+    simulated by the hybrid scheme (spot-vol correlation included), and rough Heston
+    (Volterra Euler scheme)
 
 - SVI volatility surfaces
-  - Arbitrage-aware SVI parameterization and fitting
-  - Calendar stitching to reduce cross-maturity arbitrage
-  - Visualization utilities (smiles, 2D/3D surfaces, ATM term structure)
+  - Raw-SVI per-expiry fits with butterfly no-arbitrage enforced
+    (Gatheral–Jacquier `g(k) >= 0` and Roger Lee's wing bound)
+  - Calendar stitching (total variance non-decreasing in maturity) and flat-IV
+    extrapolation outside the quoted maturities
+  - Plots of smiles and surfaces in notebook 15
 
 - Greeks & sensitivities
-  - Delta, Gamma, Vega, Theta, Rho (supports dividend yield `q`)
-  - Vanna & Volga; pathwise and finite-difference Greeks for MC
+  - Delta, Gamma, Vega, Theta, Rho (supports dividend yield `q`, including negative `q`)
+  - Vanna & Volga
 
 - Strategies and risk
-  - Standard strategies (spreads, straddles, collars, calendars)
+  - Standard strategies (spreads, straddles, strangles, collars, butterflies);
+    note `butterfly_spread(S, K1, K2, K3, r, T, sigma)` takes `r` before `T`
   - Payoff diagrams; portfolio aggregation and stress grids
-  - VaR/ES (historical and Monte Carlo) and P&L attribution
+  - VaR/ES (historical and Monte Carlo, one-day horizon) and P&L attribution
 
 - Barriers and digitals
-  - Barrier pricing via MC with Brownian-bridge correction
+  - Barrier pricing via MC with Brownian-bridge crossing probabilities, checked against
+    Reiner–Rubinstein closed forms
   - Digital cash and asset binaries under Black–Scholes
 
 - Data & utilities
-  - Optional `yfinance` helpers for stock/chain data (see `data/`)
+  - `yfinance` helpers for stock/chain data (see `data/`; needs network access)
   - Time-to-maturity, rolling vol, calendars, and helpers
+  - Hurst exponent estimators (R/S and DFA; R/S is biased upward for small H)
+
+---
+
+## Installation and tests
+
+```bash
+pip install -r requirements.txt          # or: pip install -e ".[data,notebooks,dev]"
+pytest                                   # full suite
+pytest -m "not slow"                     # skip the long Monte Carlo tests
+```
+
+Run the notebooks from the `notebooks/` directory. Notebooks 08, 09, 13, 14 (live cell), 17, 20 and 21
+download market data with `yfinance` and need network access. The optional `numba`
+extra speeds up the rough Heston simulation.
 
 ---
 
