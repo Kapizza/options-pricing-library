@@ -96,11 +96,9 @@ def _child_seeds(base_seed, n_children):
     return [int(k.generate_state(1)[0]) for k in kids]
 
 
-# Try to avoid thread oversubscription when we parallelize at Python level.
-# Respect existing env if the user already configured them.
-for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-    if _var not in os.environ:
-        os.environ[_var] = "1"
+# Thread oversubscription: set OMP_NUM_THREADS / MKL_NUM_THREADS /
+# OPENBLAS_NUM_THREADS=1 in the shell before starting Python when using the
+# process-parallel helpers (the library does not change the environment).
 
 # Optional Numba acceleration
 try:  # pragma: no cover - optional dependency

@@ -434,3 +434,15 @@ def test_xi0_short_array_is_padded_with_last_value():
     assert np.allclose(f(t), [0.04, 0.09, 0.09, 0.09, 0.09])
     g = _xi0_as_callable([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07])
     assert np.allclose(g(t), [0.01, 0.02, 0.03, 0.04, 0.05])
+
+
+def test_importing_rough_does_not_modify_environment():
+    import os, subprocess, sys, json
+    code = ("import os, json; before = dict(os.environ); import src.rough; "
+            "print(json.dumps({k: os.environ.get(k) for k in set(os.environ) ^ set(before)}))")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == {}
