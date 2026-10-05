@@ -29,3 +29,11 @@ def test_american_put_greater_than_european_put():
 
     # American put should never be cheaper than European put
     assert american_put >= european_put
+
+
+def test_invalid_risk_neutral_probability_raises():
+    # T=10, sigma=5%, r=10%, 5 steps: p = (e^{r dt} - d)/(u - d) = 2.05 > 1.
+    # The tree used to return 15.2 (BS 63.2) instead of failing.
+    import pytest
+    with pytest.raises(ValueError):
+        binomial_tree(100, 100, 10, 0.10, 0.05, steps=5, option_type="call")

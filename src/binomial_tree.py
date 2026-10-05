@@ -36,6 +36,9 @@ def binomial_tree(S, K, T, r, sigma, steps=100, option_type="call", american=Fal
     d = 1 / u
     # risk-neutral probability
     p = (np.exp(r * dt) - d) / (u - d)
+    if not (0.0 <= p <= 1.0):
+        raise ValueError(f"risk-neutral probability p={p:.4f} outside [0, 1]; "
+                         "increase steps (need sigma*sqrt(dt) > |r|*dt)")
 
     # stock prices at maturity
     ST = np.array([S * (u ** j) * (d ** (steps - j)) for j in range(steps + 1)])
