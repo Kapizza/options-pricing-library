@@ -114,9 +114,12 @@ def aggregate_greeks(positions):
 # Scenario shocks
 # ------------------------
 def scenario_pnl_delta_gamma(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
-    """Taylor P&L: Δ, Γ, ν, ρ, Θ. dSigma absolute (0.01 = +1 vol-pt), dT in years."""
+    """Taylor P&L: Δ, Γ, ν, ρ, Θ. dSigma absolute (0.01 = +1 vol-pt).
+    dT is the change in time-to-maturity in years (e.g. -1/252 when one day
+    passes), the same convention as scenario_revalue. Theta is dV/dt, so the
+    time term is -theta * dT."""
     g = aggregate_greeks(positions)
-    return g["delta"] * dS + 0.5 * g["gamma"] * dS**2 + g["vega"] * dSigma + g["rho"] * dR + g["theta"] * dT
+    return g["delta"] * dS + 0.5 * g["gamma"] * dS**2 + g["vega"] * dSigma + g["rho"] * dR - g["theta"] * dT
 
 
 def scenario_revalue(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
@@ -265,7 +268,8 @@ def historical_var_es(returns, positions, alpha=0.99):
 
 
 def mc_var_es(positions, n_sims=50000, mu=0.0, sigma_ret=0.02, alpha=0.99, method="delta_gamma", seed=42):
-    """Monte Carlo VaR/ES (delta-gamma or full repricing)."""
+    """Monte Carlo VaR/ES (delta-gamma or full repricing) over a one-day horizon.
+    Both methods include one day of time decay."""
     rng = np.random.default_rng(seed)
     rets = rng.normal(mu, sigma_ret, size=n_sims)
     pnl = np.zeros(n_sims)
@@ -284,6 +288,7 @@ def mc_var_es(positions, n_sims=50000, mu=0.0, sigma_ret=0.02, alpha=0.99, metho
             for pos in positions:
                 q = dict(pos)
                 q["S"] = pos["S"] * (1.0 + r_)
+                q["T"] = max(1e-8, pos["T"] - 1.0 / 252.0)  # one day of decay, as in delta_gamma
                 after += price_position(q)
             pnl[i] = after - base
 

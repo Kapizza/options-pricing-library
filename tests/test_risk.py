@@ -98,3 +98,20 @@ def test_pnl_attribution_respects_each_legs_maturity():
                                          r=p["r"] + 0.001, T=p["T"] - d)) for p in cal)
     assert abs(out["total"] - (after - before)) < 1e-8
     assert abs(out["delta"] + out["vega"] + out["rho"] + out["theta"] + out["residual"] - out["total"]) < 1e-8
+
+
+def test_taylor_and_full_reval_agree_on_time_decay(positions):
+    # dT is the change in time-to-maturity in both functions (-1/252: a day passes)
+    dT = -1.0 / 252.0
+    taylor = risk.scenario_pnl_delta_gamma(positions, dT=dT)
+    full = risk.scenario_revalue(positions, dT=dT)
+    assert full < 0.0
+    assert taylor == pytest.approx(full, rel=0.02)
+
+
+def test_mc_var_methods_use_the_same_horizon(positions):
+    # With (almost) no spot moves both methods should report the one-day carry.
+    params = dict(n_sims=2000, mu=0.0, sigma_ret=1e-9, alpha=0.99, seed=3)
+    dg = risk.mc_var_es(positions, method="delta_gamma", **params)
+    fr = risk.mc_var_es(positions, method="full_reval", **params)
+    assert np.mean(dg["pnl_samples"]) == pytest.approx(np.mean(fr["pnl_samples"]), rel=0.02)
