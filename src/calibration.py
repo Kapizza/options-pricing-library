@@ -32,6 +32,11 @@ from src.rough import (
 from src.heston import heston_smile_prices
 
 _VEGA_WEIGHT_SCHEME = "v3_floor0.25_cap4_normmean_wing0.35_p1"
+# Part of the calibration cache key: bump whenever model numerics change so that
+# results computed with older code are never served from the cache.
+# 2: Heston COS truncation, rBergomi hybrid scheme, rough Heston kernel,
+#    dividend-consistent IVs, relative finite-difference steps.
+_MODEL_VERSION = 2
 _VEGA_WEIGHT_FLOOR = 0.25
 _VEGA_WEIGHT_CAP = 4.0
 
@@ -167,6 +172,7 @@ def calibrate_cached(
         metric=metric,
         vega_weight=vega_weight,
         vega_weight_scheme=_VEGA_WEIGHT_SCHEME,
+        model_version=_MODEL_VERSION,
         x0=x0,
         mc=mc,
         seed=seed,

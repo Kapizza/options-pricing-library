@@ -217,3 +217,22 @@ def test_heston_calibration_uses_no_deprecated_scipy_options():
         warnings.simplefilter("error", DeprecationWarning)
         calibrate_heston([(100.0, 0.01, 0.0, 0.5, K, mids, "call")], metric="price", vega_weight=False,
                          multistart=1, options={"maxiter": 2}, verbose=False)
+
+
+def test_calibration_cache_is_invalidated_by_model_version(tmp_path, monkeypatch):
+    # Cached results computed with older model numerics must not be reused.
+    import src.calibration as cal
+    calls = []
+
+    def fake_calibrate(smiles, **kw):
+        calls.append(1)
+        return {"obj": 0.5, "x": len(calls)}, None
+
+    kw = dict(smiles=[(100.0, 0.0, 0.0, 0.5, [100.0], [5.0], "call")], metric="price", vega_weight=False,
+              x0=(0.1,), mc={}, cache_dir=str(tmp_path))
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    assert len(calls) == 1                                   # second call is a cache hit
+    monkeypatch.setattr(cal, "_MODEL_VERSION", cal._MODEL_VERSION + 1)
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    assert len(calls) == 2                                   # new numerics -> recompute
