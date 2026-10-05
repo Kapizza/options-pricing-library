@@ -283,7 +283,7 @@ def fit_svi_expiry_from_prices(S, r, q, T, K, call_mid):
     # Convert prices -> IVs (call)
     ivs = np.empty_like(call_mid, dtype=float)
     for i in range(call_mid.size):
-        ivs[i] = implied_vol_from_price(S, K[i], T, r - q, call_mid[i], option_type="call")
+        ivs[i] = implied_vol_from_price(S, K[i], T, r, call_mid[i], option_type="call", q=q)
     F = S * math.exp((r - q) * T)
     return fit_svi_expiry_from_ivs(K, ivs, T, F)
 

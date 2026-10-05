@@ -166,3 +166,19 @@ def test_short_maturity_stability_and_monotonicity():
     k0 = np.array([0.0])
     vals = np.array([(surf.iv(k0, T)[0] ** 2) * T for T in tenors])
     assert np.all(np.diff(vals) >= -1e-6)
+
+
+def test_fit_from_prices_with_dividend_yield():
+    # Call prices generated with q > 0 must be inverted with q (not with r - q),
+    # otherwise the fitted IVs are biased (3+ vol points here).
+    S0, r, q, T = 100.0, 0.03, 0.04, 0.5
+    F = S0 * math.exp((r - q) * T)
+    k = np.linspace(-0.3, 0.3, 25)
+    K = F * np.exp(k)
+    true = SVIParams(a=0.015, b=0.3, rho=-0.4, m=0.0, sigma=0.15)
+    iv_true = np.sqrt(svi_total_variance(k, true) / T)
+    calls = np.array([black_scholes_price(S0, Ki, T, r, s, option_type="call", q=q)
+                      for Ki, s in zip(K, iv_true)])
+    p = fit_svi_expiry_from_prices(S0, r, q, T, K, calls)
+    iv_fit = np.sqrt(svi_total_variance(k, p) / T)
+    assert np.max(np.abs(iv_fit - iv_true)) < 2e-3

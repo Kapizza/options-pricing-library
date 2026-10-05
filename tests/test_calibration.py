@@ -142,3 +142,24 @@ def test_smoke_iv_mode_and_progress_history():
     assert "history" in best and isinstance(best["history"], list)
     # iteration history should have at least one item if maxiter > 0
     assert len(best["history"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: market/model IV inversion with a dividend yield
+# ---------------------------------------------------------------------------
+from src.calibration import _iv_or_nan
+from src.black_scholes import black_scholes_price
+
+
+@pytest.mark.parametrize("cp", ["call", "put"])
+def test_iv_or_nan_roundtrip_with_dividends(cp):
+    S, T, r, q, sigma = 100.0, 0.5, 0.04, 0.03, 0.25
+    for K in (80.0, 100.0, 120.0):
+        px = black_scholes_price(S, K, T, r, sigma, cp, q=q)
+        assert abs(_iv_or_nan(S, K, T, r, q, px, cp) - sigma) < 1e-5
+
+
+def test_iv_or_nan_accepts_deep_itm_put_below_intrinsic():
+    S, K, T, r, sigma = 60.0, 100.0, 1.0, 0.05, 0.2
+    px = black_scholes_price(S, K, T, r, sigma, "put")
+    assert abs(_iv_or_nan(S, K, T, r, 0.0, px, "put") - sigma) < 1e-5

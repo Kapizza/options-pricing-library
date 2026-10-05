@@ -276,18 +276,19 @@ class _CalibMonitor:
 
 
 def _iv_or_nan(S, K, T, r, q, price, cp):
-    # Map to no-dividend equivalent for the solver which assumes q=0
+    # Map to the no-dividend equivalent for the solver, which assumes q=0:
+    # BS(S, K, T, r, q) == BS(S e^{-qT}, K, T, r, 0). The rate stays r.
     S_eff = S * math.exp(-q * T)
-    r_eff = r - q
+    DF = math.exp(-r * T)
 
-    intrinsic = max(0.0, S_eff - K) if cp == "call" else max(0.0, K - S_eff)
-    upper = (S_eff if cp == "call" else K * math.exp(-r_eff * T))
+    lower = max(0.0, S_eff - K * DF) if cp == "call" else max(0.0, K * DF - S_eff)
+    upper = (S_eff if cp == "call" else K * DF)
 
     eps = 1e-10
-    if not (intrinsic + eps < price < upper - eps):
+    if not (lower + eps < price < upper - eps):
         return np.nan
     try:
-        return _iv_solve(price, S_eff, K, T, r_eff, option_type=cp)
+        return _iv_solve(price, S_eff, K, T, r, option_type=cp)
     except Exception:
         return np.nan
 
