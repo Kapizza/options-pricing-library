@@ -22,7 +22,6 @@ import math
 import warnings
 import numpy as np
 from dataclasses import dataclass
-from functools import lru_cache
 
 from scipy.optimize import minimize, Bounds
 from scipy.interpolate import interp1d
@@ -349,11 +348,6 @@ class SVISurface:
     params: list          # list of SVIParams, len M
     k_grid: np.ndarray    # grid used for calendar projection (log-moneyness)
     w_grid: np.ndarray    # shape (M, K) total variance after projection (calendar no-arb)
-
-    @lru_cache(maxsize=None)
-    def _interp_T(self):
-        # Prebuild T-interpolator over w_grid for speed.
-        return interp1d(self.tenors, self.w_grid, axis=0, kind="linear", fill_value="extrapolate")
 
     def w(self, k_array, T):
         """
