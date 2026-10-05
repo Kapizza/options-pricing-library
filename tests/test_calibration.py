@@ -219,6 +219,7 @@ def test_heston_calibration_uses_no_deprecated_scipy_options():
                          multistart=1, options={"maxiter": 2}, verbose=False)
 
 
+@pytest.mark.filterwarnings("error::ResourceWarning")
 def test_calibration_cache_is_invalidated_by_model_version(tmp_path, monkeypatch):
     # Cached results computed with older model numerics must not be reused.
     import src.calibration as cal

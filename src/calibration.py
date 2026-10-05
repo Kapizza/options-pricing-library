@@ -183,7 +183,8 @@ def calibrate_cached(
     key = _hash_config({"model": model, **cfg})
     fpath = _cache_file(cache_dir, model, key)
     if os.path.exists(fpath):
-        blob = json.load(open(fpath, "r", encoding="utf-8"))
+        with open(fpath, "r", encoding="utf-8") as fh:
+            blob = json.load(fh)
         best_blob = blob.get("best")
         cache_ok = True
         if isinstance(best_blob, dict):
@@ -211,7 +212,8 @@ def calibrate_cached(
     dt = time.time() - t0
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
     blob = {"best": best, "raw": {}, "elapsed_sec": dt, "cfg": _to_ser(cfg), "cache_file": fpath}
-    json.dump(_to_ser(blob), open(fpath, "w", encoding="utf-8"), indent=2)
+    with open(fpath, "w", encoding="utf-8") as fh:
+        json.dump(_to_ser(blob), fh, indent=2)
     print(f"[cache saved] {model} ({dt:.2f}s) -> {os.path.relpath(fpath)}")
     return best, blob
 
