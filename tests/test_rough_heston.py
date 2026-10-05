@@ -139,3 +139,25 @@ def test_mc_error_decreases_with_paths(base_params):
     assert ratio > 1.6  # ideal ~ sqrt(6000/1500) = 2.0
 
 
+
+
+# --------------------------
+# Regression: Volterra kernel normalisation (mean of V vs Mittag-Leffler)
+# --------------------------
+from scipy.special import gamma as _gamma_fn
+
+
+def _mittag_leffler(z, a, terms=200):
+    return sum(z ** k / _gamma_fn(a * k + 1.0) for k in range(terms))
+
+
+def test_mean_variance_matches_mittag_leffler():
+    # E[V_t] = v0 + (theta - v0) * (1 - E_alpha(-kappa t^alpha)), alpha = H + 1/2
+    # (El Euch & Rosenbaum 2019). The drift is linear, so E[V] is exact up to
+    # time discretisation and MC noise.
+    H, kappa, theta, v0, eta = 0.1, 2.0, 0.04, 0.12, 0.3
+    a = H + 0.5
+    t, S, V = rough_heston_paths(100.0, v0, 1.0, 128, 20000, H, kappa, theta, eta, -0.5, seed=3)
+    for k in (32, 64, 128):
+        exact = v0 + (theta - v0) * (1.0 - _mittag_leffler(-kappa * t[k] ** a, a))
+        assert abs(V[:, k].mean() - exact) < 0.002, f"t={t[k]}: {V[:, k].mean()} vs {exact}"

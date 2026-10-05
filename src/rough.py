@@ -635,7 +635,8 @@ def _kernel_weights(H, N, dt):
     m = np.arange(0, N+1, dtype=float)
     alpha = np.zeros(N+1, dtype=float)
     if N>=1: alpha[1:] = m[1:]**(H+0.5) - m[:-1]**(H+0.5)
-    cH = 1.0/_gamma(H+0.5)
+    # (1/Gamma(H+1/2)) * int (t-s)^{H-1/2} ds over a step = dt^{H+1/2} * alpha[m] / Gamma(H+3/2)
+    cH = 1.0/_gamma(H+1.5)
     drift_scale = cH * (dt**(H+0.5))
     diff_scale  = cH * (dt**H)
     return cH, alpha, drift_scale, diff_scale
