@@ -1,8 +1,28 @@
 import numpy as np
 
-def finite_difference(S0, K, T, r, sigma, Smax=200, M=200, N=2000,
+def finite_difference(S0, K, T, r, sigma, Smax=None, M=200, N=2000,
                       method="explicit", option="call"):
+    """
+    European call/put on the grid S in [0, Smax] with M space steps and N time
+    steps (explicit, implicit or Crank-Nicolson). Returns the price at S0
+    (scalar or array) by linear interpolation on the grid.
+
+    Smax=None sizes the grid from the inputs: max(S0, K) * clip(exp(4 sigma
+    sqrt(T)), 2, 8), i.e. about four standard deviations above the spot/strike.
+    Raises ValueError if S0 or K lie outside the grid, or if the explicit
+    scheme's time step violates its stability bound
+    dt * (2 sigma^2 (M-1)^2 + r) <= 2 (the scheme would blow up).
+    """
+    S_ref = max(float(np.max(np.asarray(S0, dtype=float))), float(K))
+    if Smax is None:
+        Smax = S_ref * min(max(2.0, float(np.exp(4.0 * sigma * np.sqrt(T)))), 8.0)
+    if np.any(np.asarray(S0, dtype=float) > Smax) or K >= Smax:
+        raise ValueError(f"S0 and K must lie inside the grid [0, Smax={Smax}]")
     dt = T / N
+    if method == "explicit" and dt * (2.0 * sigma**2 * (M - 1)**2 + r) > 2.0:
+        n_min = int(np.ceil(T * (2.0 * sigma**2 * (M - 1)**2 + r) / 2.0))
+        raise ValueError(f"explicit scheme unstable for N={N}; use N >= {n_min} "
+                         "or the implicit / crank-nicolson method")
     dS = Smax / M
     S = np.linspace(0, Smax, M + 1)
     V = np.zeros((M + 1, N + 1))
@@ -29,7 +49,7 @@ def finite_difference(S0, K, T, r, sigma, Smax=200, M=200, N=2000,
     c = 0.5 * dt * (sigma**2 * i**2 + r * i)          # upper diag (i+1)
 
     if method == "explicit":
-        # (stability tip) choose dt small enough, e.g. dt <= (dS**2)/(sigma**2*Smax**2)
+        # stable for dt * (2 sigma^2 (M-1)^2 + r) <= 2 (checked above)
         for n in range(N-1, -1, -1):
             # interior nodes
             V[1:M, n] = (
