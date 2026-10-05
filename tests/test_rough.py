@@ -240,7 +240,10 @@ def base():
         n_paths=6000,   # keep moderate for speed; raise if needed
         H=0.10,
         eta=1.5,
-        rho=-0.7,
+        # The legacy fBM drivers below cannot carry spot-vol correlation and
+        # now require rho=0. These tests only inspect v, which those drivers
+        # generate independently of rho (identical v paths for rho=-0.7 and 0).
+        rho=0.0,
         r=0.02,
         q=0.00,
         xi0=0.04,       # flat forward variance
@@ -336,3 +339,89 @@ def test_davies_harte_covariance_is_exact(H):
     for n in (1, 8, 64):
         emp = float(np.var(B[:, n]))
         assert abs(emp / n ** (2 * H) - 1.0) < 0.02, f"Var B({n}) = {emp} vs {n ** (2 * H)}"
+
+
+# --------------------------
+# Regression: rBergomi spot-vol correlation (hybrid Riemann-Liouville driver)
+# --------------------------
+from scipy.integrate import quad
+from src.black_scholes import implied_vol_from_price
+
+
+def _smile(S, K_list, T):
+    ST = S[:, -1]
+    return [implied_vol_from_price(100.0, K, T, 0.0, float(np.mean(np.maximum(ST - K, 0.0))), "call")
+            for K in K_list]
+
+
+def test_rbergomi_rho_controls_skew_and_correlation():
+    T = 0.5
+    skews, corrs = {}, {}
+    for rho in (-0.9, 0.0, 0.9):
+        t, S, v = rbergomi_paths(100.0, T, 64, 20000, 0.1, 1.9, rho, 0.04, seed=11)
+        iv90, iv110 = _smile(S, (90.0, 110.0), T)
+        skews[rho] = iv90 - iv110
+        dlogS = np.diff(np.log(S), axis=1).ravel()
+        dlogv = np.diff(np.log(v), axis=1).ravel()
+        corrs[rho] = np.corrcoef(dlogS, dlogv)[0, 1]
+    assert skews[-0.9] > 0.05 and skews[0.9] < -0.05 and abs(skews[0.0]) < 0.02
+    # same-step corr is about rho * 0.42 here (old fBM driver: 0.004 for any rho)
+    assert corrs[-0.9] < -0.25 and corrs[0.9] > 0.25 and abs(corrs[0.0]) < 0.02
+
+
+def test_rbergomi_hybrid_forward_variance_and_volterra_variance():
+    H, eta, xi0, T, N = 0.1, 1.0, 0.04, 0.5, 64
+    t, S, v = rbergomi_paths(100.0, T, N, 40000, H, eta, -0.7, xi0, seed=5)
+    for k in (8, 32, 64):
+        assert abs(v[:, k].mean() / xi0 - 1.0) < 0.03
+        W = (np.log(v[:, k] / xi0) + 0.5 * eta ** 2 * t[k] ** (2 * H)) / eta
+        assert abs(np.var(W) / t[k] ** (2 * H) - 1.0) < 0.03
+
+
+@pytest.mark.parametrize("method", ["davies-harte", "hosking"])
+def test_legacy_fbm_drivers_reject_correlation(method):
+    with pytest.raises(ValueError):
+        rbergomi_paths(100.0, 0.5, 16, 10, 0.1, 1.5, -0.5, 0.04, seed=0, fgn_method=method)
+    rbergomi_paths(100.0, 0.5, 16, 10, 0.1, 1.5, 0.0, 0.04, seed=0, fgn_method=method)
+
+
+def _rbergomi_cholesky_calls(Ks, T, N, H, eta, rho, xi0, n_paths, seed):
+    """Exact joint simulation of (W~_{t_i}, W_{t_i}) by Cholesky; same log-Euler spot step."""
+    a = H - 0.5
+    t = np.linspace(0.0, T, N + 1)[1:]
+    C = np.zeros((2 * N, 2 * N))
+    for i, u in enumerate(t):
+        for j, w in enumerate(t):
+            m = min(u, w)
+            if i == j:
+                C[i, j] = u ** (2 * H)
+            elif u < w:
+                C[i, j] = 2 * H * quad(lambda s: (w - s) ** a, 0, u, weight="alg", wvar=(0, a))[0]
+            else:
+                C[i, j] = 2 * H * quad(lambda s: (u - s) ** a, 0, w, weight="alg", wvar=(0, a))[0]
+            C[i, N + j] = C[N + j, i] = math.sqrt(2 * H) / (a + 1) * (u ** (a + 1) - (u - m) ** (a + 1))
+            C[N + i, N + j] = m
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n_paths, 2 * N)) @ np.linalg.cholesky(C).T
+    Y = np.hstack([np.zeros((n_paths, 1)), X[:, :N]])
+    dW = np.diff(np.hstack([np.zeros((n_paths, 1)), X[:, N:]]), axis=1)
+    tg = np.concatenate([[0.0], t])
+    v = xi0 * np.exp(eta * Y - 0.5 * eta ** 2 * tg ** (2 * H))
+    dt = T / N
+    dB = rho * dW + math.sqrt(1 - rho * rho) * rng.standard_normal((n_paths, N)) * math.sqrt(dt)
+    ST = 100.0 * np.exp(np.sum(np.sqrt(v[:, :-1]) * dB - 0.5 * v[:, :-1] * dt, axis=1))
+    pays = [np.maximum(ST - K, 0.0) for K in Ks]
+    return [p.mean() for p in pays], [p.std() / math.sqrt(n_paths) for p in pays]
+
+
+def test_rbergomi_matches_exact_cholesky_simulation():
+    # Independent reference: exact Gaussian simulation of the Volterra process
+    # jointly with its driving Brownian motion (small grid).
+    T, N, H, eta, rho, xi0, n = 0.5, 32, 0.1, 1.9, -0.9, 0.04, 200_000
+    Ks = (80.0, 100.0, 120.0)
+    ref, ref_se = _rbergomi_cholesky_calls(Ks, T, N, H, eta, rho, xi0, n, seed=1)
+    t, S, v = rbergomi_paths(100.0, T, N, n, H, eta, rho, xi0, seed=2)
+    for K, m, se in zip(Ks, ref, ref_se):
+        pay = np.maximum(S[:, -1] - K, 0.0)
+        mc, mc_se = pay.mean(), pay.std() / math.sqrt(n)
+        assert abs(mc - m) < 4.0 * math.hypot(se, mc_se), f"K={K}: {mc:.4f} vs exact {m:.4f}"

@@ -338,7 +338,7 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
             t, S_paths, _V = rbergomi_paths_parallel(
                 S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
                 r=r, q=q, base_seed=base_seed, n_workers=mc.get("n_workers", 4),
-                fgn_method=mc.get("fgn_method", "davies-harte")
+                fgn_method=mc.get("fgn_method", "hybrid")
             )
             ST = S_paths[:, -1]
         else:
@@ -346,14 +346,14 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
                 ST = rbergomi_terminal_parallel_pool(
                     exec_ctx,
                     S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
-                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
+                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "hybrid"),
                     batch_size=mc.get("batch_size", 8192)
                 )
             else:
                 _t, S_paths, _V = rbergomi_paths_parallel_pool(
                     exec_ctx,
                     S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
-                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
+                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "hybrid"),
                     batch_size=mc.get("batch_size", 8192), return_variance=False
                 )
                 ST = S_paths[:, -1]
@@ -404,7 +404,7 @@ def calibrate_rbergomi(
     vega_weight: bool = True,
     bounds=((0.02, 0.45), (0.2, 3.0), (-0.999, -0.01), (1e-4, 1.0)),  # H, eta, rho, xi0
     x0=(0.10, 1.5, -0.7, 0.04),
-    mc=dict(N=192, paths=12000, fgn_method="davies-harte", batch_size=8192, n_workers=4),
+    mc=dict(N=192, paths=12000, fgn_method="hybrid", batch_size=8192, n_workers=4),
     seed: int = 1234,
     n_workers: int = 4,
     parallel_backend: str = "process",  # or "thread"

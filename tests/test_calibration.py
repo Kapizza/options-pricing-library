@@ -6,7 +6,8 @@ import pytest
 
 from src.calibration import calibrate_rbergomi, calibrate_rough_heston
 
-from src.rough import rbergomi_paths
+from src.rough import rbergomi_paths, rbergomi_terminal_parallel_pool
+from concurrent.futures import ThreadPoolExecutor
 from src.rough import rough_heston_paths
 
 
@@ -31,14 +32,16 @@ def test_rbergomi_calibration_recovers_params_iv():
     cp = "call"
     H_true, eta_true, rho_true, xi0_true = 0.12, 1.40, -0.60, 0.04
 
-    # generate one MC set and reuse for all strikes (CRN)
+    # generate one MC set and reuse for all strikes (CRN). The calibration
+    # simulates with base_seed = seed + int(1000*T) split into batches, so the
+    # market must be drawn the same way for the random numbers to be common.
     seed_mkt = 2024
-    t, S_paths, V_paths = rbergomi_paths(
-        S0=S0, T=T, N=128, n_paths=6000,
-        H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
-        r=r, q=q, seed=seed_mkt, fgn_method="davies-harte"
-    )
-    ST = S_paths[:, -1]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ST = rbergomi_terminal_parallel_pool(
+            ex, S0=S0, T=T, N=128, n_paths=6000,
+            H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
+            r=r, q=q, base_seed=seed_mkt + int(1000 * T), fgn_method="hybrid", batch_size=750
+        )
     mids = _prices_from_ST(ST, r, T, strikes, cp=cp)
     smiles = [(S0, r, q, T, strikes, mids, cp)]
 
@@ -49,7 +52,7 @@ def test_rbergomi_calibration_recovers_params_iv():
         vega_weight=True,
         x0=(0.11, 1.35, -0.55, 0.038),                 # close-ish start
         bounds=((0.05, 0.30), (0.4, 3.0), (-0.95, -0.05), (0.02, 0.08)),  # keep H off edges
-        mc=dict(N=128, paths=6000, fgn_method="davies-harte"),
+        mc=dict(N=128, paths=6000, fgn_method="hybrid", batch_size=750, n_workers=4),
         multistart=2,
         options={"maxiter": 80},
         seed=seed_mkt,                                   # CRN with market mids
@@ -120,7 +123,7 @@ def test_smoke_iv_mode_and_progress_history():
     t, S_paths, V_paths = rbergomi_paths(
         S0=S0, T=T, N=64, n_paths=2500,
         H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
-        r=r, q=q, seed=999, fgn_method="davies-harte"
+        r=r, q=q, seed=999, fgn_method="hybrid"
     )
     ST = S_paths[:, -1]
     mids = _prices_from_ST(ST, r, T, K, cp=cp)
@@ -131,7 +134,7 @@ def test_smoke_iv_mode_and_progress_history():
         metric="iv",
         vega_weight=True,
         x0=(0.10, 1.3, -0.45, 0.035),
-        mc=dict(N=64, paths=2500, fgn_method="davies-harte"),
+        mc=dict(N=64, paths=2500, fgn_method="hybrid"),
         multistart=1,
         options={"maxiter": 12},
         verbose=True,        # exercise the monitor
