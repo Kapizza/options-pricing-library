@@ -366,8 +366,15 @@ class SVISurface:
             f_k = interp1d(self.k_grid, self.w_grid[m], kind="linear", fill_value="extrapolate")
             w_T.append(f_k(k))
         w_T = np.vstack(w_T)  # (M, len(k))
+        # Outside the quoted tenors keep implied vol flat (w proportional to T);
+        # linear extrapolation in w makes IV = sqrt(w/T) explode as T -> 0.
+        tenors = np.asarray(self.tenors, dtype=float)
+        T = float(T)
+        if T <= tenors.min() or T >= tenors.max():
+            j = int(np.argmin(tenors)) if T <= tenors.min() else int(np.argmax(tenors))
+            return w_T[j] * (T / tenors[j])
         fT = interp1d(self.tenors, w_T, axis=0, kind="linear", fill_value="extrapolate")
-        return fT(float(T))
+        return fT(T)
 
     def butterfly_g(self):
         """

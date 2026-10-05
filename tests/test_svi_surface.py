@@ -239,3 +239,27 @@ def test_surface_butterfly_check():
     g = surf.butterfly_g()
     assert g.shape == surf.w_grid.shape
     assert np.nanmin(g[:, 2:-2]) >= -1e-3
+
+
+def test_iv_is_flat_outside_quoted_tenors():
+    # Below the first tenor, total variance must go to 0 with T (flat IV);
+    # linear extrapolation in w made the ATM IV explode as T -> 0.
+    S0, r, q = 100.0, 0.02, 0.0
+    truths = {0.05: SVIParams(0.002, 0.10, -0.6, 0.01, 0.08),
+              0.25: SVIParams(0.008, 0.12, -0.5, 0.02, 0.12),
+              0.5: SVIParams(0.016, 0.13, -0.45, 0.02, 0.15),
+              1.0: SVIParams(0.03, 0.14, -0.4, 0.03, 0.2)}
+    chains = {}
+    for T, p in truths.items():
+        F = S0 * math.exp((r - q) * T)
+        kk = np.linspace(-0.5, 0.35, 35)
+        chains[T] = {"K": F * np.exp(kk), "iv": np.sqrt(svi_total_variance(kk, p) / T)}
+    surf = fit_svi_surface(chains, S0=S0, r=r, q=q, mode="iv")
+    k = np.array([-0.2, 0.0, 0.2])
+    iv_first, iv_last = surf.iv(k, 0.05), surf.iv(k, 1.0)
+    for T in (0.03, 0.01, 0.002):
+        assert np.allclose(surf.iv(k, T), iv_first, rtol=1e-10)
+    for T in (1.5, 3.0):
+        assert np.allclose(surf.iv(k, T), iv_last, rtol=1e-10)
+    # interpolation between tenors is unchanged: w at a quoted tenor is the grid row
+    assert np.allclose(surf.w(surf.k_grid, 0.25), surf.w_grid[list(surf.tenors).index(0.25)])
