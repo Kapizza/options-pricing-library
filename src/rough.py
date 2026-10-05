@@ -117,14 +117,16 @@ def fbm_davies_harte(N, H, n_paths, rng):
     if not (0.0 < H < 1.0):
         raise ValueError("H must be in (0,1)")
 
-    m = np.arange(0, N, dtype=float)
+    # fGn autocovariance at lags 0..N; circulant embedding of size 2N
+    # (first row: r_0..r_{N-1}, r_N, r_{N-1}..r_1), as in Dieker (2004).
+    m = np.arange(0, N + 1, dtype=float)
     r = 0.5 * (np.power(m + 1.0, 2.0 * H) - 2.0 * np.power(m, 2.0 * H) + np.power(np.abs(m - 1.0), 2.0 * H))
     r[0] = 1.0
 
     c = np.empty(2 * N, dtype=float)
-    c[:N] = r
-    c[N] = 0.0
-    c[N+1:] = r[1:][::-1]
+    c[:N] = r[:N]
+    c[N] = r[N]
+    c[N+1:] = r[1:N][::-1]
 
     lam = np.fft.fft(c).real
     lam = np.maximum(lam, 0.0)
@@ -136,7 +138,7 @@ def fbm_davies_harte(N, H, n_paths, rng):
     for k in range(1, N):
         a = rng.normal(0.0, 1.0, size=n_paths)
         b = rng.normal(0.0, 1.0, size=n_paths)
-        Z[:, k] = a + 1j * b
+        Z[:, k] = (a + 1j * b) / np.sqrt(2.0)   # E|Z_k|^2 = 1, like the real modes k=0, N
         Z[:, 2 * N - k] = np.conj(Z[:, k])
 
     Y = Z * sqrtlam[None, :]
@@ -359,12 +361,6 @@ def rbergomi_paths(
         for i in range(n_paths):
             fgn = fbm_increments_hosking(N, H, rng)
             W_H[i, 1:] = np.cumsum(fgn) * (dt**H)
-
-    # One global normalization (self-similarity fixes all t)
-    var_emp  = float(np.var(W_H[:, -1], ddof=1))
-    var_theo = float(t[-1]**(2.0 * H))
-    if var_emp > 0.0 and var_emp != var_theo:
-        W_H *= math.sqrt(var_theo / var_emp)
 
     # Correlated Brownian for S
     Z1 = rng.standard_normal((n_paths, N))

@@ -317,3 +317,22 @@ def test_speed_branch_selection_visible(base):
     t2, S2, v2 = _run(base, "hosking")
     assert S1.shape == S2.shape == (base["n_paths"], base["N"] + 1)
     assert v1.shape == v2.shape
+
+# --------------------------
+# Regression: Davies-Harte fBM has the exact fGn covariance
+# --------------------------
+from src.rough import fbm_davies_harte
+
+
+@pytest.mark.parametrize("H", [0.1, 0.3, 0.7])
+def test_davies_harte_covariance_is_exact(H):
+    N, n_paths = 64, 100_000
+    B = fbm_davies_harte(N, H, n_paths, np.random.default_rng(2024))
+    X = np.diff(B, axis=1)                        # unit-step fGn
+    gam = lambda k: 0.5 * (abs(k + 1) ** (2 * H) - 2 * abs(k) ** (2 * H) + abs(k - 1) ** (2 * H))
+    for lag in (0, 1, 2, 10):
+        emp = float(np.mean(X[:, 5] * X[:, 5 + lag]))
+        assert abs(emp - gam(lag)) < 0.02, f"lag {lag}: {emp} vs {gam(lag)}"
+    for n in (1, 8, 64):
+        emp = float(np.var(B[:, n]))
+        assert abs(emp / n ** (2 * H) - 1.0) < 0.02, f"Var B({n}) = {emp} vs {n ** (2 * H)}"
