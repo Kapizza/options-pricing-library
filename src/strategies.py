@@ -40,9 +40,13 @@ def bear_put_spread(S, K1, K2, T, r, sigma):
     return long_put(S, K1, T, r, sigma) + short_put(S, K2, T, r, sigma)
 
 
-def butterfly_spread(S, K1, K2, K3, T, r, sigma):
+def butterfly_spread(S, K1, K2, K3, r, T, sigma):
     """
-    Computes the price of a butterfly spread using European calls.
+    Computes the price of a butterfly spread using European calls:
+    long K1, short 2 x K2, long K3.
+
+    NOTE: the argument order is (..., r, T, sigma), unlike the other helpers
+    in this module which take (..., T, r, sigma). Pass r and T by keyword.
 
     Parameters:
     S : float
@@ -64,7 +68,6 @@ def butterfly_spread(S, K1, K2, K3, T, r, sigma):
     float
         Price of the butterfly spread
     """
-def butterfly_spread(S, K1, K2, K3, r, T, sigma):
     # optional: sanity checks
     # if not (K1 < K2 < K3 and (K2 - K1) == (K3 - K2)):
     #     raise ValueError("Butterfly requires K1<K2<K3 with equal spacing.")
