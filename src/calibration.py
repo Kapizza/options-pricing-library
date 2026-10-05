@@ -210,6 +210,19 @@ def calibrate_cached(
     return best, blob
 
 
+def _relative_fd_steps(opt, x):
+    """
+    SciPy's L-BFGS-B always passes its `eps` option (default 1e-8) to the
+    finite-difference routine as an absolute step, and an absolute step overrides
+    `finite_diff_rel_step`. Convert a requested relative step into per-parameter
+    absolute steps so that it actually takes effect.
+    """
+    if "eps" not in opt and "finite_diff_rel_step" in opt:
+        rel = np.asarray(opt.pop("finite_diff_rel_step"), dtype=float)
+        opt["eps"] = rel * np.maximum(np.abs(np.asarray(x, dtype=float)), 1e-3)
+    return opt
+
+
 class _CalibMonitor:
     def __init__(self, tag: str = "calib", print_every: int = 1, verbose: bool = True):
         self.tag = tag
@@ -482,6 +495,7 @@ def calibrate_rbergomi(
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
                 _opt["finite_diff_rel_step"] = 5e-2
+            _opt = _relative_fd_steps(_opt, guess)
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),
@@ -684,6 +698,7 @@ def calibrate_rough_heston(
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
                 _opt["finite_diff_rel_step"] = 5e-2
+            _opt = _relative_fd_steps(_opt, guess)
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),

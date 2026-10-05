@@ -166,3 +166,42 @@ def test_iv_or_nan_accepts_deep_itm_put_below_intrinsic():
     S, K, T, r, sigma = 60.0, 100.0, 1.0, 0.05, 0.2
     px = black_scholes_price(S, K, T, r, sigma, "put")
     assert abs(_iv_or_nan(S, K, T, r, 0.0, px, "put") - sigma) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Regression: the MC calibrators' relative finite-difference step is honoured.
+# SciPy's L-BFGS-B passes `eps` (1e-8) as an absolute step, which overrode the
+# intended 5% relative step, so gradients of the MC objective were taken over
+# 1e-8 parameter moves.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("model", ["rbergomi", "rough_heston"])
+def test_mc_calibrators_use_relative_fd_steps(model, monkeypatch):
+    import src.calibration as cal
+    S0, r, q, T = 100.0, 0.01, 0.0, 0.5
+    K = np.array([90.0, 100.0, 110.0])
+    mids = np.array([11.0, 5.5, 2.0])
+    seen = []
+    if model == "rbergomi":
+        name, fn = "_rbergomi_objective", cal.calibrate_rbergomi
+        x0 = np.array([0.12, 1.4, -0.6, 0.04])
+        kw = dict(mc=dict(N=16, paths=400, fgn_method="hybrid"))
+    else:
+        name, fn = "_rough_heston_objective", cal.calibrate_rough_heston
+        x0 = np.array([0.04, 1.5, 0.04, 1.0, -0.6, 0.12])
+        kw = dict(mc=dict(N=16, paths=400, batch_size=400))
+    orig = getattr(cal, name)
+
+    def recording(params, *a, **k):
+        seen.append(np.array(params, dtype=float))
+        return orig(params, *a, **k)
+
+    monkeypatch.setattr(cal, name, recording)
+    fn([(S0, r, q, T, K, mids, "call")], metric="price", vega_weight=False, x0=tuple(x0),
+       multistart=1, options={"maxiter": 1}, verbose=False, parallel_backend="thread",
+       n_workers=1, **kw)
+    probes = seen[1:1 + len(x0)]          # forward-difference probes around x0
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        i = moved[0]
+        assert 0.04 < abs(p[i] - x0[i]) / abs(x0[i]) < 0.06
