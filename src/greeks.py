@@ -36,7 +36,7 @@ def delta(S, K, T, r, sigma, option_type="call", *, q=0.0):
     Put :  Δ = e^{-qT} [N(d1) - 1]
     """
     d1, _ = _d1d2(S, K, T, r, sigma, q=q)
-    w = np.exp(-np.maximum(_as_array(q) * _as_array(T), 0.0))
+    w = np.exp(-_as_array(q) * np.maximum(_as_array(T), 0.0))
     Nd1 = norm.cdf(d1)
     if option_type.lower() == "call":
         return w * Nd1
@@ -54,7 +54,7 @@ def gamma(S, K, T, r, sigma, *, q=0.0):
     T_ = np.maximum(_as_array(T), 1e-12)
     sig_ = np.maximum(_as_array(sigma), 1e-12)
     S_ = np.maximum(_as_array(S), 1e-300)
-    w = np.exp(-np.maximum(_as_array(q) * T_, 0.0))
+    w = np.exp(-_as_array(q) * T_)
     return w * norm.pdf(d1) / (S_ * sig_ * np.sqrt(T_))
 
 
@@ -66,7 +66,7 @@ def vega(S, K, T, r, sigma, *, q=0.0):
     """
     d1, _ = _d1d2(S, K, T, r, sigma, q=q)
     T_ = np.maximum(_as_array(T), 1e-12)
-    w = np.exp(-np.maximum(_as_array(q) * T_, 0.0))
+    w = np.exp(-_as_array(q) * T_)
     return w * _as_array(S) * norm.pdf(d1) * np.sqrt(T_)
 
 
