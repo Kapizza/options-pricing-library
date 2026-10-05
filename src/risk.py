@@ -138,17 +138,19 @@ def scenario_revalue(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
 # ------------------------
 def pnl_attribution_first_order(positions, S0, sigma0, r0, T0, S1, sigma1, r1, T1):
     """
-    P&L attribution using pathwise full revaluation with Shapley-style averaging over two orders:
+    P&L attribution by sequential full revaluation, averaged over two orders:
         Order A: S -> sigma -> r -> T
         Order B: sigma -> S -> r -> T
+    (only S and sigma are permuted; r and T are always applied last).
 
     Key details:
-      • Each leg keeps its own starting sigma_i0 = pos["sigma"].
-      • We apply a uniform vol shock dSigma = (sigma1 - sigma0) to every leg:
-          sigma_i, end = sigma_i0 + dSigma
-      • S, r, T are shocked to (S1, r1, T1) as given.
-      • Components are computed by full repricing after each step, then averaged across the two orders.
-      • This makes residual ≈ 0 up to float noise and passes strict tests.
+      • Every leg starts from its own state (pos["S"], pos["sigma"], pos["r"], pos["T"]).
+      • The shocks are moves applied to every leg:
+          dS = S1 - S0, dSigma = sigma1 - sigma0, dR = r1 - r0, dT = T1 - T0,
+        e.g. T_i, end = T_i + dT, so legs with different maturities are handled.
+      • Components are computed by full repricing after each step, then averaged
+        across the two orders. The components telescope, so the residual is zero
+        up to float noise by construction; it is not an accuracy measure.
     """
     # Global shocks
     dS     = float(S1)     - float(S0)
@@ -160,13 +162,14 @@ def pnl_attribution_first_order(positions, S0, sigma0, r0, T0, S1, sigma1, r1, T
     sig0 = [float(p["sigma"]) for p in positions]
 
     def price_with(Sv, rv, Tv, add_sigma):
-        """Full portfolio price for state (S=Sv, r=rv, T=Tv) and per-leg sigma_i = sigma_i0 + add_sigma."""
+        """Full portfolio price with each leg's S, r, T moved by (Sv-S0, rv-r0, Tv-T0)
+        and per-leg sigma_i = sigma_i0 + add_sigma."""
         total = 0.0
         for p, s0 in zip(positions, sig0):
             q = dict(p)
-            q["S"] = Sv
-            q["r"] = rv
-            q["T"] = max(1e-8, Tv)
+            q["S"] = float(p["S"]) + (Sv - float(S0))
+            q["r"] = float(p["r"]) + (rv - float(r0))
+            q["T"] = max(1e-8, float(p["T"]) + (Tv - float(T0)))
             q["sigma"] = max(1e-8, s0 + add_sigma)
             total += price_position(q)
         return total

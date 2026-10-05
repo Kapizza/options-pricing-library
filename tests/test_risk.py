@@ -80,3 +80,21 @@ def test_stress_grid_contains_base_and_shapes(positions):
     base = df[(df["S_move"] == 0.0) & (df["vol_move"] == 0.0) & (df["r_move"] == 0.0)]
     assert len(base) == 1
     assert abs(float(base["PnL"].iloc[0])) < 1e-8
+
+
+def test_pnl_attribution_respects_each_legs_maturity():
+    # Calendar spread: the two legs have different T. Attribution must move
+    # each leg from its own state, so the total equals the full-revaluation P&L.
+    cal = [
+        {"option": "call", "side": +1, "quantity": 1, "S": 100.0, "K": 100.0, "T": 1.00, "r": 0.03, "sigma": 0.20, "multiplier": 100},
+        {"option": "call", "side": -1, "quantity": 1, "S": 100.0, "K": 100.0, "T": 0.25, "r": 0.03, "sigma": 0.20, "multiplier": 100},
+    ]
+    d = 1.0 / 252.0
+    S0, s0, r0, T0 = 100.0, 0.20, 0.03, 0.25
+    S1, s1, r1, T1 = 101.0, 0.21, 0.031, 0.25 - d
+    out = risk.pnl_attribution_first_order(cal, S0, s0, r0, T0, S1, s1, r1, T1)
+    before = sum(risk.price_position(p) for p in cal)
+    after = sum(risk.price_position(dict(p, S=p["S"] + 1.0, sigma=p["sigma"] + 0.01,
+                                         r=p["r"] + 0.001, T=p["T"] - d)) for p in cal)
+    assert abs(out["total"] - (after - before)) < 1e-8
+    assert abs(out["delta"] + out["vega"] + out["rho"] + out["theta"] + out["residual"] - out["total"]) < 1e-8
