@@ -98,23 +98,6 @@ def _project_params(p):
     return SVIParams(a, b, rho, m, s)
 
 
-def _numeric_convex(wk, k, tol=-1e-8):
-    """
-    Numeric convexity guard: finite-difference second derivative >= tol.
-    A small negative tol allows tiny discretization noise.
-    """
-    k = np.asarray(k, dtype=float)
-    wk = np.asarray(wk, dtype=float)
-    if k.size < 5:
-        return True  # not enough points to judge reliably
-    h = np.gradient(k)
-    wpp = (np.roll(wk, -1) - 2 * wk + np.roll(wk, 1)) / (
-        (0.5 * (h + np.roll(h, 1))) ** 2 + 1e-16
-    )
-    wpp = wpp[1:-1]
-    return np.all(wpp >= tol)
-
-
 # -------------------------- Per-expiry SVI calibration ------------------------
 def _convexify_row_in_k(k_grid, w_row):
     """
@@ -158,12 +141,6 @@ def _map_unconstrained_to_svi(theta):
     # ensure nonnegative total variance at the minimum
     a = (math.exp(c) ** 2) - b * sigma * math.sqrt(max(0.0, 1.0 - rho * rho)) + 1e-12
     return SVIParams(a=a, b=b, rho=rho, m=m, sigma=sigma)
-
-def _huber(res, delta):
-    a = np.abs(res)
-    quad = 0.5 * (res ** 2)
-    lin  = delta * (a - 0.5 * delta)
-    return np.where(a <= delta, quad, lin)
 
 def fit_svi_expiry_from_ivs(K, iv, T, F):
     """

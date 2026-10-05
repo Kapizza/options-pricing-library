@@ -237,62 +237,6 @@ def fbm_increments_hosking(
 
 
 
-# ------------------------ fast fGn via Davies–Harte (FFT) ------------------------
-if 0:
-
-    from functools import lru_cache
-
-    @lru_cache(maxsize=None)
-    def _dh_rfft_eigs(N, H):
-        # first row of the 2N circulant covariance for fGn
-        def gamma(k):
-            k = abs(int(k))
-            if k == 0:
-                return 1.0
-            return 0.5 * ((k + 1)**(2*H) - 2*(k**(2*H)) + (k - 1)**(2*H))
-
-        N = int(N)
-        if N < 1:
-            raise ValueError("N must be >= 1")
-        if not (0.0 < H < 1.0):
-            raise ValueError("H must be in (0, 1)")
-
-        g = np.array([gamma(k) for k in range(N)], dtype=float)
-        c = np.empty(2*N, dtype=float)
-        c[:N] = g
-        c[N] = 0.0
-        c[N+1:] = g[1:][::-1]
-
-        lam = np.fft.rfft(c).real   # length N+1, nonnegative up to rounding
-        lam = np.maximum(lam, 0.0)
-        return lam  # rfft eigenvalues
-
-
-    def fgn_davies_harte(N, H, n_paths, rng):
-        N = int(N)
-        M = 2 * N
-        lam = _dh_rfft_eigs(N, H)            # length N+1 rfft eigenvalues
-
-        U = rng.standard_normal((n_paths, N+1))
-        V = rng.standard_normal((n_paths, N+1))
-
-        Y = np.empty((n_paths, N+1), dtype=np.complex128)
-        Y[:, 0] = np.sqrt(lam[0]) * U[:, 0]
-        Y[:, N] = np.sqrt(lam[N]) * U[:, N] if N > 0 else 0.0
-
-        if N > 1:
-            scale = np.sqrt(lam[1:N] / 2.0)[None, :]
-            Y[:, 1:N] = (U[:, 1:N] + 1j * V[:, 1:N]) * scale
-
-        # NumPy irfft has a 1/M factor; compensate by sqrt(M)
-        x_full = np.fft.irfft(Y, n=M, axis=1).real * np.sqrt(M)
-        x = x_full[:, :N]
-        s = float(np.std(x[:, 0], ddof=1))
-        if s > 0:
-            x /= s
-        return x
-
-
 # ------------------------ Riemann-Liouville Volterra process (hybrid scheme) ------------------------
 
 def volterra_hybrid(N, H, dt, n_paths, rng):

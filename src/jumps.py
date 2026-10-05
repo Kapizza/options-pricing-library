@@ -159,10 +159,6 @@ def merton_price_cos(S0, K, T, r, q, sigma, lam, muJ, sigJ,
 
 
 
-def merton_call_put_parity(S0, K, T, r, q, price_call):
-    return price_call - S0 * math.exp(-q * T) + K * math.exp(-r * T)
-
-
 # Convenience: parity and sanity checks helpers
 
 def merton_call_put_parity(S0, K, T, r, q, price_call):
