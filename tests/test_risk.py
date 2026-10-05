@@ -115,3 +115,15 @@ def test_mc_var_methods_use_the_same_horizon(positions):
     dg = risk.mc_var_es(positions, method="delta_gamma", **params)
     fr = risk.mc_var_es(positions, method="full_reval", **params)
     assert np.mean(dg["pnl_samples"]) == pytest.approx(np.mean(fr["pnl_samples"]), rel=0.02)
+
+
+def test_positions_use_their_dividend_yield():
+    from src.black_scholes import black_scholes_price
+    from src.greeks import delta, vanna_volga
+    pos = {"option": "call", "side": +1, "quantity": 2, "S": 100.0, "K": 100.0, "T": 0.5,
+           "r": 0.03, "sigma": 0.2, "q": 0.05, "multiplier": 100}
+    m = 200.0
+    assert risk.price_position(pos) == pytest.approx(m * black_scholes_price(100, 100, 0.5, 0.03, 0.2, "call", q=0.05))
+    assert risk.greeks_position(pos)["delta"] == pytest.approx(m * float(delta(100, 100, 0.5, 0.03, 0.2, "call", q=0.05)))
+    hv = vanna_volga(100, 100, 0.5, 0.03, 0.2, q=0.05)
+    assert risk.higher_greeks_position(pos)["vanna"] == pytest.approx(m * float(hv["vanna"]))

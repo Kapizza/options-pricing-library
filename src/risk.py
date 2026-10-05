@@ -68,7 +68,7 @@ def price_position(pos):
     """Return position value in portfolio units."""
     p = bs_price(
         pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"],
-        pos.get("option", "call")
+        pos.get("option", "call"), q=pos.get("q", 0.0)
     )
     return pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos) * p
 
@@ -77,12 +77,13 @@ def greeks_position(pos):
     """Scaled Greeks (Δ, Γ, ν, Θ, ρ) for one position in portfolio units."""
     S, K, T, r_, sig = pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"]
     opt = pos.get("option", "call")
+    q_ = pos.get("q", 0.0)
     g = {
-        "delta": delta(S, K, T, r_, sig, opt),
-        "gamma": gamma(S, K, T, r_, sig),
-        "vega":  vega(S, K, T, r_, sig),          # per 1.00 vol (×0.01 for 1 vol-pt)
-        "theta": theta(S, K, T, r_, sig, opt),     # per year
-        "rho":   rho(S, K, T, r_, sig, opt),       # per 1.00 rate
+        "delta": delta(S, K, T, r_, sig, opt, q=q_),
+        "gamma": gamma(S, K, T, r_, sig, q=q_),
+        "vega":  vega(S, K, T, r_, sig, q=q_),          # per 1.00 vol (×0.01 for 1 vol-pt)
+        "theta": theta(S, K, T, r_, sig, opt, q=q_),     # per year
+        "rho":   rho(S, K, T, r_, sig, opt, q=q_),       # per 1.00 rate
     }
     m = pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos)
     return {k: m * v for k, v in g.items()}
@@ -91,7 +92,11 @@ def greeks_position(pos):
 def higher_greeks_position(pos):
     """Vanna/Volga in portfolio units."""
     S, K, T, r_, sig = pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"]
-    hv = vanna_volga(S, K, T, r_, sig)  # {"vanna": ..., "volga": ...}
+    q_ = pos.get("q", 0.0)
+    if _vanna_volga_ext is not None:
+        hv = _vanna_volga_ext(S, K, T, r_, sig, q=q_)  # {"vanna": ..., "volga": ...}
+    else:
+        hv = vanna_volga(S, K, T, r_, sig)
     m = pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos)
     return {"vanna": m * hv["vanna"], "volga": m * hv["volga"]}
 
