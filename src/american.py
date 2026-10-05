@@ -86,7 +86,8 @@ def american_lsmc(S0, K, T, r, sigma,
             cashflows[idx] = payoff[itm, t][exercise_now]
 
     price = float(np.mean(cashflows) * disc)
-    return price
+    # exercise decision at t=0: the holder can always take the intrinsic value
+    return max(price, float(payoff[0, 0]))
 
 
 def american_put_lsmc(S0, K, T, r, sigma,
