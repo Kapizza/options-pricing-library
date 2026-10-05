@@ -141,25 +141,31 @@ def implied_vol_from_price(S, K, T, r, price, option_type="call", q=0.0, tol=1e-
     """
     Implied volatility from price using Black–Scholes–Merton with q.
     Uses Brent root-finding + Newton fallback.
+
+    Returns NaN when the price lies outside the no-arbitrage bounds
+    call: (max(S e^{-qT} - K e^{-rT}, 0), S e^{-qT}),
+    put:  (max(K e^{-rT} - S e^{-qT}, 0), K e^{-rT}),
+    or when no volatility in (1e-6, 10] reproduces it.
     """
-    S, K, T, r, price = map(float, (S, K, T, r, price))
+    S, K, T, r, price, q = map(float, (S, K, T, r, price, q))
 
     if T <= 0 or S <= 0 or K <= 0 or price <= 0:
         return np.nan
 
     disc_r = math.exp(-r * T)
     disc_q = math.exp(-q * T)
-    F = S * disc_q / disc_r
 
-    intrinsic = (S - K) if option_type.lower() == "call" else (K - S)
-    intrinsic = max(0.0, intrinsic)
-    if price < intrinsic:
-        price = intrinsic + 1e-12
+    if option_type.lower() == "call":
+        lower, upper = max(S * disc_q - K * disc_r, 0.0), S * disc_q
+    else:
+        lower, upper = max(K * disc_r - S * disc_q, 0.0), K * disc_r
+    if not (lower < price < upper):
+        return np.nan
 
     def f(sig):
         return black_scholes_price(S, K, T, r, sig, option_type=option_type, q=q) - price
 
-    lo, hi = 1e-6, 5.0
+    lo, hi = 1e-6, 10.0
     flo, fhi = f(lo), f(hi)
 
     if np.isfinite(flo) and np.isfinite(fhi) and flo * fhi < 0:
@@ -169,19 +175,20 @@ def implied_vol_from_price(S, K, T, r, price, option_type="call", q=0.0, tol=1e-
             pass
 
     iv = 0.2
-    for _ in range(20):
+    px = black_scholes_price(S, K, T, r, iv, option_type=option_type, q=q)
+    for _ in range(50):
+        if abs(px - price) < max(1e-10, tol * price):
+            return float(iv)
         d = bs_d1_d2(S, K, T, r, iv, q=q)
         d1 = d["d1"]
         vega = S * math.exp(-q * T) * norm.pdf(d1) * math.sqrt(T)
         if vega < 1e-12:
             break
-        px = black_scholes_price(S, K, T, r, iv, option_type=option_type, q=q)
         iv -= (px - price) / vega
-        iv = min(max(iv, 1e-6), 5.0)
-        if abs(px - price) < max(1e-10, tol * price):
-            break
+        iv = min(max(iv, 1e-6), 10.0)
+        px = black_scholes_price(S, K, T, r, iv, option_type=option_type, q=q)
 
-    return float(iv)
+    return float(iv) if abs(px - price) < max(1e-10, tol * price) else np.nan
 
 # --------------------------------------------------------------------------------------
 # Delta helper (kept for compatibility with your notebooks)

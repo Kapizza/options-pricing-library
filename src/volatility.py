@@ -21,14 +21,15 @@ def implied_volatility(
     if T <= 0:
         raise ValueError("Time to maturity must be positive.")
 
-    intrinsic = max(0.0, S - K if option_type == "call" else K - S)
-
+    # No-arbitrage bounds for European options (no dividends)
     if option_type == "call":
+        min_price = max(0.0, S - K * np.exp(-r * T))
         max_price = S
     else:
+        min_price = max(0.0, K * np.exp(-r * T) - S)
         max_price = K * np.exp(-r * T)
 
-    if price <= intrinsic + 1e-8 or price >= max_price - 1e-8:
+    if price <= min_price + 1e-8 or price >= max_price - 1e-8:
         return np.nan
 
     def objective(sigma):
