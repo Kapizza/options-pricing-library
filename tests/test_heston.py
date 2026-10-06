@@ -172,3 +172,87 @@ def test_small_vol_of_vol_long_maturity_price():
     P = dict(kappa=2.0, theta=0.04, sigma=3e-5, v0=0.09, rho=0.7)
     assert abs(heston_price(100.0, 100.0, 10.0, 0.0, **P) - ref) < 1e-6
     assert abs(heston_smile_prices(100.0, 0.0, 0.0, 10.0, [100.0], **P)[0] - ref) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Regression: bounded (put) payoff and fat-tail truncation range in the COS pricers
+# ---------------------------------------------------------------------------
+import itertools
+
+# Lewis (2001) single-integral prices with a cancellation-free CF (scratch script;
+# adaptive and Gauss-Legendre quadrature agree to 1.4e-14). The first case lies
+# inside calibrate_heston's default bounds and is also confirmed by a conditional
+# Monte Carlo with exact CIR steps (11.4786 +- 0.0070).
+_FAT_TAILED_ATM = [
+    ((100.0, 100.0, 2.0, 0.0, 0.1829, 0.2468, 2.43, 0.252, -0.7167), 11.4815463492),
+    ((100.0, 100.0, 10.0, 0.0, 0.5, 0.3, 2.0, 0.5, -0.99), 35.4791549200),
+    ((100.0, 100.0, 1.0, 0.0, 0.5, 0.3, 2.0, 0.5, 0.99), 25.4984203539),
+    ((100.0, 100.0, 1.0, 0.0, 2.0, 0.04, 2.0, 0.05, 0.99), 4.8160086003),
+]
+
+
+@pytest.mark.parametrize("args, ref", _FAT_TAILED_ATM)
+def test_fat_tailed_atm_prices_match_reference(args, ref):
+    # The call payoff (e^y - 1)^+ has COS coefficients of size e^b, b = c1 + 12 sd,
+    # which amplify CF round-off, and it loses the right tail beyond b: the
+    # pricers returned 143.553, 6.53e18, 21.532 and 3.887 here.
+    S0, K, T, r, kappa, theta, sigma, v0, rho = args
+    P = dict(kappa=kappa, theta=theta, sigma=sigma, v0=v0, rho=rho)
+    put_ref = ref - S0 + K * math.exp(-r * T)
+    assert abs(heston_price(*args) - ref) < 1e-4
+    assert abs(heston_price(*args, option="put") - put_ref) < 1e-4
+    assert abs(heston_smile_prices(S0, r, 0.0, T, [K], N=4096, **P)[0] - ref) < 1e-4
+    # the default N = 1536 under-resolves the wide windows these laws need
+    assert abs(heston_smile_prices(S0, r, 0.0, T, [K], **P)[0] - ref) < 1e-2
+
+
+def test_feller_violating_smile_matches_reference():
+    # Inside calibrate_heston's bounds (Feller ratio 0.01, excess kurtosis 290).
+    # A window of 12 sqrt(c2) cuts off the fat left tail: the call expansion
+    # was off by 0.04, and puts on that window would be off by 0.05.
+    # References: Lewis (2001) integral as above (quadratures agree to 3e-14).
+    P = dict(kappa=0.5, theta=0.01, sigma=1.0, v0=0.01, rho=-0.9)
+    S0, T, r = 100.0, 2.0, 0.03
+    Ks = np.array([50.0, 70.0, 100.0, 140.0, 200.0])
+    ref_q = np.array([51.1277095407, 32.5262655205, 5.20898977602, 0.00168297667263, 1.46421398313e-05])
+    ref_0 = np.array([53.1031705194, 34.4936794538, 7.08250499875, 0.00229147046532, 1.92957109562e-05])
+    assert np.max(np.abs(heston_smile_prices(S0, r, 0.01, T, Ks, N=4096, **P) - ref_q)) < 1e-5
+    assert np.max(np.abs(heston_smile_prices(S0, r, 0.01, T, Ks, **P) - ref_q)) < 3e-3
+    assert np.max(np.abs(np.array([heston_price(S0, K, T, r, **P) for K in Ks]) - ref_0)) < 1e-5
+
+
+def test_no_arbitrage_bounds_inside_calibration_bounds():
+    # Corners and centre of calibrate_heston's default bounds: v0 and theta in
+    # [1e-4, 0.5], kappa in [0.05, 8], sigma in [0.02, 2.5], rho in [-0.999, -0.01].
+    # The call expansion gave prices up to 3.5e7 here. What remains are COS errors
+    # where rho -> -1 nearly caps S_T (the density of ln S_T gets an almost
+    # vertical edge): up to 0.07 at N = 1536 and 0.013 at N = 4096.
+    S0, r, q, tol = 100.0, 0.03, 0.01, 0.1
+    Ks = np.array([50.0, 70.0, 100.0, 140.0, 200.0])
+    for v0, kappa, theta, sigma, rho, T in itertools.product(
+            [1e-4, 0.04, 0.5], [0.05, 1.5, 8.0], [1e-4, 0.04, 0.5], [0.02, 0.6, 2.5], [-0.999, -0.7, -0.01],
+            [0.05, 0.5, 2.0]):
+        P = dict(kappa=kappa, theta=theta, sigma=sigma, v0=v0, rho=rho)
+        Fq, Kr = S0 * math.exp(-q * T), Ks * math.exp(-r * T)
+        c = heston_smile_prices(S0, r, q, T, Ks, **P)
+        p = heston_smile_prices(S0, r, q, T, Ks, option="put", **P)
+        assert np.all(c >= np.maximum(Fq - Kr, 0.0) - tol) and np.all(c <= Fq + tol), (P, T, c)
+        assert np.all(p >= np.maximum(Kr - Fq, 0.0) - tol) and np.all(p <= Kr + tol), (P, T, p)
+        if T > 0.05:  # heston_price (q = 0) on a subset, for run time
+            for K in (50.0, 100.0, 200.0):
+                Kr0 = K * math.exp(-r * T)
+                c0 = heston_price(S0, K, T, r, **P)
+                p0 = heston_price(S0, K, T, r, option="put", **P)
+                assert max(S0 - Kr0, 0.0) - tol <= c0 <= S0 + tol, (P, T, K, c0)
+                assert max(Kr0 - S0, 0.0) - tol <= p0 <= Kr0 + tol, (P, T, K, p0)
+
+
+def test_smile_prices_equal_heston_price_per_strike():
+    Ks = np.array([50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 125.0, 150.0, 175.0, 200.0])
+    for P, T in [(dict(kappa=2.0, theta=0.04, sigma=0.6, v0=0.05, rho=-0.7), 0.5),
+                 (dict(kappa=0.3, theta=0.06, sigma=1.6, v0=0.01, rho=-0.9), 2.0),
+                 (dict(kappa=6.0, theta=0.01, sigma=0.8, v0=0.09, rho=0.3), 0.1)]:
+        for option in ("call", "put"):
+            smile = heston_smile_prices(100.0, 0.02, 0.0, T, Ks, N=4096, option=option, **P)
+            single = np.array([heston_price(100.0, K, T, 0.02, option=option, **P) for K in Ks])
+            assert np.max(np.abs(smile - single)) < 1e-8
