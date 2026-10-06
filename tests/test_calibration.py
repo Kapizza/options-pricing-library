@@ -303,3 +303,18 @@ def test_calibration_cache_is_invalidated_by_model_version(tmp_path, monkeypatch
     monkeypatch.setattr(cal, "_MODEL_VERSION", cal._MODEL_VERSION + 1)
     cal.calibrate_cached("dummy", fake_calibrate, **kw)
     assert len(calls) == 2                                   # new numerics -> recompute
+
+
+def test_finite_diff_rel_step_none_keeps_scipy_default(monkeypatch):
+    # None is SciPy's documented "automatic" value. It used to become an
+    # all-NaN eps, and SciPy's bound adjustment then probed every parameter
+    # at its far bound.
+    from src.calibration import _relative_fd_steps
+    opt = _relative_fd_steps({"finite_diff_rel_step": None}, [0.12, 1.4, -0.6, 0.04])
+    assert "finite_diff_rel_step" not in opt and "eps" not in opt
+    x0, probes = _fd_probes("rough_heston", monkeypatch, {"maxiter": 1, "finite_diff_rel_step": None})
+    assert len(probes) == len(x0)
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        assert 0.0 < abs(p[moved[0]] - x0[moved[0]]) <= 1e-7

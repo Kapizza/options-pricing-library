@@ -226,8 +226,10 @@ def _relative_fd_steps(opt, x):
     absolute steps so that it actually takes effect.
     """
     if "eps" not in opt and "finite_diff_rel_step" in opt:
-        rel = np.asarray(opt.pop("finite_diff_rel_step"), dtype=float)
-        opt["eps"] = rel * np.maximum(np.abs(np.asarray(x, dtype=float)), 1e-3)
+        rel = opt.pop("finite_diff_rel_step")
+        if rel is not None:  # None is SciPy's "choose automatically": keep eps
+            rel = np.asarray(rel, dtype=float)
+            opt["eps"] = rel * np.maximum(np.abs(np.asarray(x, dtype=float)), 1e-3)
     return opt
 
 
