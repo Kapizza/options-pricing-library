@@ -154,7 +154,8 @@ def _mittag_leffler(z, a, terms=200):
 def test_mean_variance_matches_mittag_leffler():
     # E[V_t] = v0 + (theta - v0) * (1 - E_alpha(-kappa t^alpha)), alpha = H + 1/2
     # (El Euch & Rosenbaum 2019). The drift is linear, so E[V] is exact up to
-    # time discretisation and MC noise.
+    # time discretisation and MC noise, plus a small upward bias from the
+    # scheme's 1e-14 variance floor (about +0.001 here, inside the tolerance).
     H, kappa, theta, v0, eta = 0.1, 2.0, 0.04, 0.12, 0.3
     a = H + 0.5
     t, S, V = rough_heston_paths(100.0, v0, 1.0, 128, 20000, H, kappa, theta, eta, -0.5, seed=3)

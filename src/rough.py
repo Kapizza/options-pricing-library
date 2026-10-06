@@ -340,7 +340,8 @@ def rbergomi_paths(
     - Uses log-Euler step for S with drift (r - q), diffusion sqrt(v) at the left point.
     - rBergomi variance is lognormal by design, v_t = xi0(t) * exp(eta*W~_t - 0.5*eta^2 Var(W~_t)).
       With the hybrid scheme the compensator uses the exact variance of the discretised
-      W~ (within 0.1% of t^{2H}), so E[v_t] = xi0(t) on the grid.
+      W~ (within 0.1% of t^{2H} for H <= 0.7, up to 0.7% as H -> 1), so E[v_t] = xi0(t)
+      on the grid.
     """
     S0 = _floor_pos(S0); T = _floor_pos(T)
     N = int(N); n_paths = int(n_paths)
