@@ -58,30 +58,11 @@ def cf_merton(u, T, r, q, sigma, lam, muJ, sigJ):
 # COS helper utilities
 # -------------------------
 
-def _cos_coeff_unit_call(a, b, N):
-    # F_k for payoff max(e^y - 1, 0) with the integration domain [a, b]
-    k = np.arange(N)
-    omega = k * math.pi / (b - a)
-
-    def chi(xl, xu):
-        # ∫_xl^xu e^y cos(ω (y - a)) dy
-        c = np.cos(omega * (xu - a)) * np.exp(xu) - np.cos(omega * (xl - a)) * np.exp(xl)
-        s = omega * (np.sin(omega * (xu - a)) * np.exp(xu) - np.sin(omega * (xl - a)) * np.exp(xl))
-        return (c + s) / (1.0 + omega * omega)
-
-    def psi(xl, xu):
-        # ∫_xl^xu cos(ω (y - a)) dy, with k=0 limit handled
-        out = (np.sin(omega * (xu - a)) - np.sin(omega * (xl - a))) / np.where(omega == 0.0, 1.0, omega)
-        out[0] = (xu - xl)
-        return out
-
-    xl, xu = 0.0, b
-    Fk = 2.0 / (b - a) * (chi(xl, xu) - psi(xl, xu))
-    return Fk
-
-
 def _cos_coeff_unit_put(a, b, N):
-    # F_k for payoff max(1 - e^y, 0) with the integration domain [a, b]
+    # F_k for payoff max(1 - e^y, 0) with the integration domain [a, b], per strike:
+    # a, b have shape (M,), the result (M, N). Exercise region [a, min(0, b)], empty if a >= 0.
+    a = np.asarray(a, dtype=float)[:, None]
+    b = np.asarray(b, dtype=float)[:, None]
     k = np.arange(N)
     omega = k * math.pi / (b - a)
 
@@ -92,62 +73,73 @@ def _cos_coeff_unit_put(a, b, N):
 
     def psi(xl, xu):
         out = (np.sin(omega * (xu - a)) - np.sin(omega * (xl - a))) / np.where(omega == 0.0, 1.0, omega)
-        out[0] = (xu - xl)
+        out[:, 0] = (xu - xl)[:, 0]
         return out
 
-    xl, xu = a, 0.0
+    xl, xu = a, np.maximum(np.minimum(0.0, b), a)
     Fk = 2.0 / (b - a) * (psi(xl, xu) - chi(xl, xu))
+    Fk[a[:, 0] >= 0.0, :] = 0.0
     return Fk
 
 
 def _truncation_range_logmoneyness(T, r, q, sigma, lam, muJ, sigJ, L=12):
     """
-    Truncation [a, b] for y = log(S_T/K) = log(S_T/S0) + log(S0/K).
-    Because we price with the CF of Y = log(S_T/S0) and later shift by x0 = log(S0/K),
-    we center [a, b] on Y's cumulants (independent of K, S0).
+    Truncation [a, b] = [c1 - L s, c1 + L s] for Y = log(S_T/S0), with the scale
+    s = sqrt(c2 + sqrt(c4)) of Fang & Oosterlee (2008) for fat tails: rare large
+    jumps put mass far beyond L sqrt(c2). The pricer shifts the window by
+    x0 = log(S0/K) per strike, so that the window for y = log(S_T/K) = x0 + Y is
+    centred on the mean of y.
     """
     kappa = math.exp(muJ + 0.5 * sigJ * sigJ) - 1.0
-    # Mean and variance of Y_T
+    # Cumulants of Y_T (the jump part contributes lam T E[J^n])
     c1 = (r - q - 0.5 * sigma * sigma - lam * kappa) * T + lam * T * muJ
     c2 = sigma * sigma * T + lam * T * (sigJ * sigJ + muJ * muJ)
-    a = c1 - L * math.sqrt(max(c2, 1e-16))
-    b = c1 + L * math.sqrt(max(c2, 1e-16))
+    c4 = lam * T * (muJ ** 4 + 6.0 * muJ * muJ * sigJ * sigJ + 3.0 * sigJ ** 4)
+    s = math.sqrt(max(c2 + math.sqrt(max(c4, 0.0)), 1e-16))
+    a = c1 - L * s
+    b = c1 + L * s
     return a, b
 
 
 def merton_price_cos(S0, K, T, r, q, sigma, lam, muJ, sigJ,
                      option="call", N=2048, L=12, return_components=False):
     """
-    COS pricing in y = log(S_T/K). Price = K * e^{-rT} * sum_k Re[ φ_Y(u_k) * exp(i u_k (x0 - a)) ] * F_k
-    where x0 = log(S0/K), φ_Y is CF of log-return, and F_k are unit-payoff coefficients.
+    COS pricing in y = log(S_T/K) = x0 + Y, x0 = log(S0/K), Y = log(S_T/S0).
+    Each strike gets the window [a, b] = [x0 + c1 - L s, x0 + c1 + L s],
+    s = sqrt(c2 + sqrt(c4)), centred on the mean of y; the width is shared, so
+    u_k and φ_Y(u_k) are too.
+    Puts are expanded with the bounded payoff (1 - e^y)^+:
+        Put = K * e^{-rT} * sum_k Re[ φ_Y(u_k) * exp(i u_k (x0 - a)) ] * F_k,
+    and calls follow from parity, C = P + S0 e^{-qT} - K e^{-rT} (the call payoff
+    grows like e^y, so its coefficients carry e^b and the right tail beyond b is lost).
+    With return_components, also returns (u, a, b, F) with per-strike a, b of
+    shape (M,) and put coefficients F of shape (M, N).
     """
+    if option not in ("call", "put"):
+        raise ValueError("option must be 'call' or 'put'")
     K = np.atleast_1d(np.asarray(K, dtype=float))
-    a, b = _truncation_range_logmoneyness(T, r, q, sigma, lam, muJ, sigJ, L=L)
+    lo, hi = _truncation_range_logmoneyness(T, r, q, sigma, lam, muJ, sigJ, L=L)
 
     k = np.arange(N)
-    u = k * math.pi / (b - a)
+    u = k * math.pi / (hi - lo)
     phi = cf_merton(u, T, r, q, sigma, lam, muJ, sigJ)
 
-    if option == "call":
-        Fk = _cos_coeff_unit_call(a, b, N)
-    elif option == "put":
-        Fk = _cos_coeff_unit_put(a, b, N)
-    else:
-        raise ValueError("option must be 'call' or 'put'")
+    # Per-strike windows for y = x0 + Y; exp(i u (x0 - a)) = exp(-i u lo) is shared
+    x0 = np.log(max(S0, 1e-300) / np.maximum(K, 1e-300))
+    a = x0 + lo
+    b = x0 + hi
+    Fk = _cos_coeff_unit_put(a, b, N)
 
     # COS weights
     w = np.ones(N)
     w[0] = 0.5
 
     disc = math.exp(-r * T)
-    prices = np.empty_like(K)
-
-    # For each strike, shift by x0 = log(S0/K)
-    for i, Ki in enumerate(K):
-        x0 = math.log(max(S0, 1e-300) / max(Ki, 1e-300))
-        phase = np.exp(1j * u * (x0 - a))
-        series = w * Fk * np.real(phi * phase)
-        prices[i] = Ki * disc * np.sum(series)
+    puts = K * disc * (Fk @ (w * np.real(phi * np.exp(-1j * u * lo))))
+    if option == "call":
+        prices = puts + S0 * math.exp(-q * T) - K * disc
+    else:
+        prices = puts
 
     if prices.size == 1:
         prices = float(prices[0])
