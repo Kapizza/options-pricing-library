@@ -36,7 +36,9 @@ _VEGA_WEIGHT_SCHEME = "v3_floor0.25_cap4_normmean_wing0.35_p1"
 # results computed with older code are never served from the cache.
 # 2: Heston COS truncation, rBergomi hybrid scheme, rough Heston kernel,
 #    dividend-consistent IVs, relative finite-difference steps.
-_MODEL_VERSION = 2
+# 3: Heston COS put coefficients + parity, fat-tail window and cancellation-free
+#    CF; rBergomi back to SciPy's default finite-difference step.
+_MODEL_VERSION = 3
 _VEGA_WEIGHT_FLOOR = 0.25
 _VEGA_WEIGHT_CAP = 4.0
 
