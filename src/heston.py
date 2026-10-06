@@ -20,14 +20,18 @@ def heston_charfunc(u, T, r, kappa, theta, sigma, v0, rho, S0=1.0):
     i = 1j
     a = kappa * theta
     b = kappa
-    d = np.sqrt((rho * sigma * i * u - b)**2 + (sigma**2) * (i*u + u**2))
-    g = (b - rho*sigma*i*u - d) / (b - rho*sigma*i*u + d)
-    exp_negdT = np.exp(-d*T)
-    C = i*u*(np.log(S0) + r*T) + (a/(sigma**2)) * (
-        (b - rho*sigma*i*u - d)*T - 2.0*np.log((1 - g*exp_negdT)/(1 - g))
-    )
-    D = ((b - rho*sigma*i*u - d)/(sigma**2)) * ((1 - exp_negdT)/(1 - g*exp_negdT))
-    return np.exp(C + D*v0)
+    # At u = 0 with kappa = 0 the closed form is 0/0 (b = d = 0); silence that
+    # warning here and return the exact value phi(0) = E[1] = 1 below.
+    with np.errstate(invalid="ignore"):
+        d = np.sqrt((rho * sigma * i * u - b)**2 + (sigma**2) * (i*u + u**2))
+        g = (b - rho*sigma*i*u - d) / (b - rho*sigma*i*u + d)
+        exp_negdT = np.exp(-d*T)
+        C = i*u*(np.log(S0) + r*T) + (a/(sigma**2)) * (
+            (b - rho*sigma*i*u - d)*T - 2.0*np.log((1 - g*exp_negdT)/(1 - g))
+        )
+        D = ((b - rho*sigma*i*u - d)/(sigma**2)) * ((1 - exp_negdT)/(1 - g*exp_negdT))
+        phi = np.exp(C + D*v0)
+    return np.where(u == 0, 1.0, phi)[()]
 
 def _mean_integrated_variance(T, kappa, theta, v0):
     """E[int_0^T v_t dt] under Heston: theta*T + (v0 - theta)*(1 - e^{-kappa T})/kappa."""
@@ -40,18 +44,25 @@ def _cumulants_x(T, r, kappa, theta, sigma, v0, rho, S0):
     First two cumulants of X = ln S_T, used for the COS truncation range.
 
     c1 is exact: ln S0 + r T - E[int v dt] / 2.
-    c2 is the exact variance of ln S_T, taken from the characteristic function
-    by a central second difference of log(phi) at u = 0 (step 1e-3). The
-    closed-form c2 printed in Fang & Oosterlee (2008) is about 2% off for their
-    own test parameters and breaks down as kappa -> 0.
+    c2 estimates the variance of ln S_T from the characteristic function by a
+    central second difference of log(phi) at u = 0 (step h = 1e-3, using
+    log phi(0) = 0 exactly), so it carries an O(h^2) truncation error plus the
+    CF's round-off divided by h^2. The closed-form c2 printed in Fang &
+    Oosterlee (2008) is about 2% off for their own test parameters and breaks
+    down as kappa -> 0.
     """
     c1 = np.log(S0) + r*T - 0.5 * _mean_integrated_variance(T, kappa, theta, v0)
     if sigma < 1e-6:
         # (near-)deterministic variance: Var(ln S_T) = E[int v dt]
         return float(c1), max(1e-12, float(_mean_integrated_variance(T, kappa, theta, v0)))
     h = 1e-3
-    lp = np.log(heston_charfunc(np.array([-h, 0.0, h]), T, r, kappa, theta, sigma, v0, rho, S0=S0))
-    c2 = -float((lp[2] + lp[0] - 2.0 * lp[1]).real) / (h * h)
+    lp = np.log(heston_charfunc(np.array([-h, h]), T, r, kappa, theta, sigma, v0, rho, S0=S0))
+    c2 = -float((lp[0] + lp[1]).real) / (h * h)
+    if not np.isfinite(c2):
+        raise ValueError(
+            "Heston variance of ln S_T is not finite for these parameters "
+            f"(T={T}, kappa={kappa}, theta={theta}, sigma={sigma}, v0={v0}, rho={rho})."
+        )
     return float(c1), max(1e-12, c2)
 
 def _cos_coefficients_call_y(a, b, k):

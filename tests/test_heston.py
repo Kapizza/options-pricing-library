@@ -108,3 +108,33 @@ def test_low_vol_of_vol_with_v0_not_theta(sigma):
     else:
         ref = _heston_gil_pelaez(S0, K, T, r, 0.0, kappa, theta, sigma, v0, 0.0)
         assert abs(px - ref) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Regression: kappa = 0 (no mean reversion)
+# ---------------------------------------------------------------------------
+
+def test_kappa_zero_matches_small_kappa_and_is_not_black_scholes():
+    # At kappa = 0 the closed-form CF is 0/0 at u = 0, so c2 was NaN; the NaN
+    # was clamped to 1e-12, which triggered the degenerate fallback and both
+    # pricers returned BS(sqrt(v0)) = 7.965567 whatever sigma and rho were.
+    # Reference 5.950734939: Lewis (2001) single-integral price at kappa = 0
+    # (scratch script; adaptive and Gauss-Legendre quadrature agree to 1e-13,
+    # and _heston_gil_pelaez above gives 5.9507349387).
+    S0, K, T, r = 100.0, 100.0, 1.0, 0.0
+    P = dict(theta=0.04, sigma=0.5, v0=0.04, rho=-0.7)
+    ref = 5.950734939
+    assert heston_charfunc(0.0, T, r, 0.0, **P) == 1.0
+    p0 = heston_price(S0, K, T, r, 0.0, **P)
+    p9 = heston_price(S0, K, T, r, 1e-9, **P)
+    s0 = heston_smile_prices(S0, r, 0.0, T, [K], kappa=0.0, **P)[0]
+    s9 = heston_smile_prices(S0, r, 0.0, T, [K], kappa=1e-9, **P)[0]
+    assert abs(p0 - p9) < 1e-6 and abs(s0 - s9) < 1e-6
+    assert abs(p0 - ref) < 1e-6 and abs(s0 - ref) < 1e-6
+    bs = black_scholes_price(S0, K, T, r, math.sqrt(P["v0"]), option_type="call")
+    assert abs(p0 - bs) > 1.0 and abs(s0 - bs) > 1.0
+    # strike vector with dividends
+    Ks = np.array([80.0, 100.0, 125.0])
+    s0 = heston_smile_prices(S0, 0.02, 0.01, T, Ks, kappa=0.0, **P)
+    s9 = heston_smile_prices(S0, 0.02, 0.01, T, Ks, kappa=1e-9, **P)
+    assert np.max(np.abs(s0 - s9)) < 1e-6
