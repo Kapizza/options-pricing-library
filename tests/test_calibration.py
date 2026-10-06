@@ -286,6 +286,8 @@ def test_heston_calibration_uses_no_deprecated_scipy_options():
 
 
 @pytest.mark.filterwarnings("error::ResourceWarning")
+# an unclosed file warns from a finalizer, which pytest re-raises as this
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
 def test_calibration_cache_is_invalidated_by_model_version(tmp_path, monkeypatch):
     # Cached results computed with older model numerics must not be reused.
     import src.calibration as cal
