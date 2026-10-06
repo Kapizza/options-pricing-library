@@ -294,6 +294,21 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
     """
     K = np.asarray(K, dtype=float)
     iv = np.asarray(iv, dtype=float)
+    # a quote without an implied vol (e.g. a price outside the no-arbitrage
+    # bounds, which implied_vol_from_price maps to NaN) cannot be fitted
+    finite = np.isfinite(K) & np.isfinite(iv)
+    if not finite.all():
+        warnings.warn(
+            f"SVI fit at T={float(T):.4f}: dropped {int(finite.size - finite.sum())} of "
+            f"{finite.size} quotes whose strike or implied vol is not finite",
+            RuntimeWarning,
+        )
+        K, iv = K[finite], iv[finite]
+    if K.size < 3:
+        raise ValueError(
+            f"SVI fit at T={float(T):.4f} needs at least 3 quotes with a finite strike "
+            f"and implied vol, got {K.size}"
+        )
     iv = np.clip(iv, 1e-8, 5.0)
 
     T = float(max(T, 1e-8))

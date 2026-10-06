@@ -189,6 +189,30 @@ def test_fit_from_prices_with_dividend_yield():
     assert np.max(np.abs(iv_fit - iv_true)) < 2e-3
 
 
+def test_fit_from_prices_drops_quote_without_implied_vol():
+    # A call quoted below its forward intrinsic S e^{-qT} - K e^{-rT} has no
+    # implied vol (implied_vol_from_price gives NaN). One such quote made the
+    # fit crash with "not enough values to unpack"; it must be dropped with a
+    # warning and the smile recovered from the other strikes.
+    S0, r, q, T = 100.0, 0.03, 0.01, 0.5
+    F = S0 * math.exp((r - q) * T)
+    k = np.linspace(-0.3, 0.3, 25)
+    K = F * np.exp(k)
+    true = SVIParams(a=0.015, b=0.3, rho=-0.4, m=0.0, sigma=0.15)
+    iv_true = np.sqrt(svi_total_variance(k, true) / T)
+    calls = np.array([black_scholes_price(S0, Ki, T, r, s, option_type="call", q=q)
+                      for Ki, s in zip(K, iv_true)])
+    calls[2] = S0 * math.exp(-q * T) - K[2] * math.exp(-r * T) - 0.05
+    with pytest.warns(RuntimeWarning, match="dropped 1 of 25 quotes"):
+        p = fit_svi_expiry_from_prices(S0, r, q, T, K, calls)
+    iv_fit = np.sqrt(svi_total_variance(k, p) / T)
+    assert np.max(np.abs(np.delete(iv_fit - iv_true, 2))) < 2e-3
+    # fewer than 3 usable quotes: a clear error
+    with pytest.warns(RuntimeWarning, match="dropped 2 of 3"), \
+            pytest.raises(ValueError, match="at least 3 quotes"):
+        fit_svi_expiry_from_ivs(K[:3], [0.3, np.nan, np.nan], T, F)
+
+
 # ---------------------------------------------------------------------------
 # Regression: butterfly (density) no-arbitrage, Gatheral & Jacquier (2014)
 # g(k) = (1 - k w'/(2w))^2 - w'^2/4 (1/w + 1/4) + w''/2 >= 0
