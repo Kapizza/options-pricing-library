@@ -37,3 +37,16 @@ def test_invalid_risk_neutral_probability_raises():
     import pytest
     with pytest.raises(ValueError):
         binomial_tree(100, 100, 10, 0.10, 0.05, steps=5, option_type="call")
+
+
+def test_expiry_returns_intrinsic_value():
+    # At T=0 the tree has u = d = 1 and p = 0/0; the probability guard then
+    # raised "increase steps", which no step count can fix (main returned NaN).
+    import pytest
+    from src.american import american_price
+    assert binomial_tree(90, 100, 0.0, 0.05, 0.2, option_type="put") == 10.0
+    assert binomial_tree(90, 100, 0.0, 0.05, 0.2, option_type="call") == 0.0
+    assert binomial_tree(110, 100, 0.0, 0.05, 0.2, option_type="call", american=True) == 10.0
+    assert american_price(90, 100, 0.0, 0.05, 0.2, method="binomial", option="put") == 10.0
+    with pytest.raises(ValueError, match="sigma"):
+        binomial_tree(100, 100, 1.0, 0.05, 0.0)
