@@ -145,6 +145,144 @@ def _map_unconstrained_to_svi(theta):
     a = (math.exp(c) ** 2) - b * sigma * math.sqrt(max(0.0, 1.0 - rho * rho)) + 1e-12
     return SVIParams(a=a, b=b, rho=rho, m=m, sigma=sigma)
 
+
+# ----------------------- Butterfly no-arbitrage check -------------------------
+# A raw-SVI slice is free of butterfly arbitrage iff g(k) >= 0 for all k (see
+# svi_butterfly_g), Roger Lee's wing bound b (1 + |rho|) <= 2 holds and
+# w(k) > 0. g is checked out to |k| = 50 on a grid that is dense over the
+# quoted range +- 2 and also resolves the smile's vertex: a short-dated slice
+# has sigma ~ 0.01, below the spacing of a fixed grid, and g can dip below 0
+# between fixed grid points there.
+
+_ARB_K_MAX = 50.0
+# vertex grid m + sigma * u: 401 points on [-50, 50], uniform in asinh(u), so
+# 0.023 sigma apart at the vertex and 2.3% of |u| apart in the wings
+_ARB_VERTEX_U = np.sinh(np.linspace(-math.asinh(_ARB_K_MAX), math.asinh(_ARB_K_MAX), 401))
+
+
+def _arb_base_grid(k_lo, k_hi, n_dense=2001, n_wing=200):
+    """
+    Fixed part of the butterfly check grid for a slice quoted on [k_lo, k_hi]:
+    n_dense points on [k_lo - 2, k_hi + 2] and n_wing log-spaced points on
+    each side out to |k| = 50.
+    """
+    lo, hi = k_lo - 2.0, k_hi + 2.0
+    h = (hi - lo) / (n_dense - 1)
+    left = lo - np.geomspace(h, max(_ARB_K_MAX + lo, h), n_wing)
+    right = hi + np.geomspace(h, max(_ARB_K_MAX - hi, h), n_wing)
+    return np.concatenate([left[::-1], np.linspace(lo, hi, n_dense), right])
+
+
+def _arb_grid(p, k_base):
+    """Check grid for slice p: k_base plus the vertex grid m + sigma * u."""
+    k_vertex = np.clip(p.m + p.sigma * _ARB_VERTEX_U, -_ARB_K_MAX, _ARB_K_MAX)
+    return np.concatenate([k_base, k_vertex])
+
+
+def _svi_arb_check(p, k_base, n_refine=16, n_sub=33):
+    """
+    Butterfly no-arbitrage check of a raw-SVI slice. Requires
+      - g(k) >= 0 on the check grid, refined (two levels of n_sub points)
+        around its n_refine lowest local minima, so that a dip between grid
+        points is not missed;
+      - Roger Lee's wing bound b (1 + |rho|) <= 2;
+      - min_k w(k) = a + b sigma sqrt(1 - rho^2) > 0.
+    Returns (ok, lowest g found).
+    """
+    k = np.sort(_arb_grid(p, k_base))
+    g = svi_butterfly_g(k, p)
+    g_min = float(np.min(g))                 # nan or -inf fail the check
+    if np.isfinite(g_min):
+        i = np.flatnonzero((g[1:-1] <= g[:-2]) & (g[1:-1] <= g[2:])) + 1
+        if i.size:
+            i = i[np.argsort(g[i])[:n_refine]]
+            lo, hi = k[i - 1], k[i + 1]
+            u = np.linspace(0.0, 1.0, n_sub)
+            rows = np.arange(i.size)
+            for _ in range(2):
+                kk = lo[:, None] + (hi - lo)[:, None] * u
+                gg = svi_butterfly_g(kk, p)
+                g_min = min(g_min, float(np.min(gg)))
+                j = np.clip(np.argmin(gg, axis=1), 1, n_sub - 2)
+                lo, hi = kk[rows, j - 1], kk[rows, j + 1]
+    lee = p.b * (1.0 + abs(p.rho))
+    w_min = p.a + p.b * p.sigma * math.sqrt(max(0.0, 1.0 - p.rho * p.rho))
+    ok = bool(g_min >= 0.0) and lee <= 2.0 and w_min > 0.0
+    return ok, g_min
+
+
+def _svi_repair(k, w_tgt, p_free, k_base, g_margin=1e-4):
+    """
+    Constrained refit of a slice that fails _svi_arb_check. SLSQP minimises
+    mean((w - w_tgt)^2) / w_scale^2 (w_scale = median w_tgt) subject to
+    g >= g_margin on the check grid, Lee's bound and min w > 0, from p_free
+    and from data-scaled starts. A result is accepted only if SLSQP reports
+    success and it passes _svi_arb_check. Returns the accepted result with the
+    smallest error, or None if there is none.
+    """
+    w_scale = float(np.median(w_tgt))
+    k_span = max(float(k.max() - k.min()), 1e-4)
+    b_scale = w_scale / k_span
+    # optimise in data units: a ~ w, b ~ w / k_span, m and sigma ~ k_span
+    scale = np.array([w_scale, b_scale, 1.0, k_span, k_span])
+    w_eps = 1e-6 * w_scale
+
+    def unpack(z):
+        x = z * scale
+        return SVIParams(x[0], x[1], x[2], x[3], x[4])
+
+    def objective(z):
+        r = svi_total_variance(k, unpack(z)) - w_tgt
+        return float(np.mean(r * r)) / (w_scale * w_scale)
+
+    def con_g(z):
+        p = unpack(z)
+        g = svi_butterfly_g(_arb_grid(p, k_base), p)
+        # keep the constraint finite for SLSQP (g = -inf where w <= 0)
+        return np.clip(np.nan_to_num(g, nan=-1e3), -1e3, 1e3) - g_margin
+
+    def con_lee(z):
+        x = z * scale
+        return 2.0 - 1e-9 - x[1] * (1.0 + abs(x[2]))
+
+    def con_wmin(z):
+        x = z * scale
+        return (x[0] + x[1] * x[4] * math.sqrt(max(0.0, 1.0 - x[2] * x[2])) - w_eps) / w_scale
+
+    cons = [{"type": "ineq", "fun": con_g},
+            {"type": "ineq", "fun": con_lee},
+            {"type": "ineq", "fun": con_wmin}]
+    bounds = [(None, None), (0.0, 2.0 / b_scale), (-0.999, 0.999),
+              (None, None), (1e-6, None)]
+
+    # starts: p_free, and linear least-squares fits of
+    # w = a + d (k - m0) + c sqrt((k - m0)^2 + s0^2), read as b = c, rho = d / c
+    # and moved inside Lee's bound and min w > 0
+    starts = [np.array([p_free.a, p_free.b, p_free.rho, p_free.m, p_free.sigma])]
+    w_floor = 0.25 * float(np.min(w_tgt))
+    for m0 in (float(k[np.argmin(w_tgt)]), float(np.median(k))):
+        for s_frac in (0.05, 0.1, 0.2, 0.4):
+            s0 = s_frac * k_span
+            X = np.column_stack([np.ones_like(k), k - m0, np.sqrt((k - m0) ** 2 + s0 * s0)])
+            a0, d0, c0 = np.linalg.lstsq(X, w_tgt, rcond=None)[0]
+            b0 = max(c0, 1e-3 * b_scale)
+            rho0 = float(np.clip(d0 / b0, -0.95, 0.95))
+            b0 = min(b0, 1.9 / (1.0 + abs(rho0)))
+            a0 = max(a0, w_floor - b0 * s0 * math.sqrt(1.0 - rho0 * rho0))
+            starts.append(np.array([a0, b0, rho0, m0, s0]))
+
+    best, best_f = None, np.inf
+    for x0 in starts:
+        res = minimize(objective, x0 / scale, method="SLSQP", bounds=bounds,
+                       constraints=cons, options=dict(maxiter=300, ftol=1e-12))
+        if not res.success or not np.all(np.isfinite(res.x)) or res.fun >= best_f:
+            continue
+        p = unpack(res.x)
+        if _svi_arb_check(p, k_base)[0]:
+            best, best_f = p, float(res.fun)
+    return best
+
+
 def fit_svi_expiry_from_ivs(K, iv, T, F):
     """
     Robust per-expiry SVI fit with feasibility mapping.
@@ -175,30 +313,16 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
         denom = (d1 - d0) if abs(d1 - d0) > 1e-10 else 1e-10
         return max(1e-4, (w_hi - w_lo) / denom)
 
-    # Butterfly no-arbitrage is enforced by a penalty: g(k) >= 0 on the data
-    # range +- 1 in log-moneyness, and the Roger Lee wing bound
-    # b (1 + |rho|) <= 2, which makes g >= 0 asymptotically.
-    # A small margin keeps g >= 0 between the grid points as well.
-    k_arb = np.linspace(k.min() - 2.0, k.max() + 2.0, 1201)
-    g_margin = 1e-4
-    arb_weight = 1e3
-
-    def arb_penalty(p):
-        g = svi_butterfly_g(k_arb, p)
-        viol = np.minimum(g - g_margin, 0.0)
-        lee = max(0.0, p.b * (1.0 + abs(p.rho)) - 2.0)
-        return arb_weight * (float(np.mean(viol * viol)) + lee * lee)
-
     def loss_huber_theta(theta):
         p = _map_unconstrained_to_svi(theta)
         w = svi_total_variance(k, p)
-        return float(np.mean(_huber(w - w_tgt, huber_delta))) + arb_penalty(p)
+        return float(np.mean(_huber(w - w_tgt, huber_delta)))
 
     def loss_mse_theta(theta):
         p = _map_unconstrained_to_svi(theta)
         w = svi_total_variance(k, p)
         r = w - w_tgt
-        return float(np.mean(r * r)) + arb_penalty(p)
+        return float(np.mean(r * r))
 
     # --- starts: grid + jitters ---
     rng = np.random.RandomState(42)
@@ -262,7 +386,7 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
         p_loc = _map_unconstrained_to_svi([c, beta, rho_tilde, m_uncon, s_uncon])
         w = svi_total_variance(k, p_loc)
         r = w - w_tgt
-        return float(np.mean(r * r)) + arb_penalty(p_loc)
+        return float(np.mean(r * r))
 
     # bracket around current c
     c0 = float(theta[0])
@@ -272,32 +396,22 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
     theta[0] = float(res_c.x)
     p = _map_unconstrained_to_svi(theta)
 
-    # Hard constraint: if the penalised fit still violates g >= 0 or the Lee
-    # bound, polish with SLSQP under explicit inequality constraints.
-    if np.min(svi_butterfly_g(k_arb, p)) < g_margin or p.b * (1.0 + abs(p.rho)) > 2.0:
-        unpack = lambda x: SVIParams(x[0], x[1], x[2], x[3], x[4])
-        cons = [
-            {"type": "ineq", "fun": lambda x: svi_butterfly_g(k_arb, unpack(x)) - g_margin},
-            {"type": "ineq", "fun": lambda x: 2.0 - x[1] * (1.0 + abs(x[2]))},
-            {"type": "ineq", "fun": lambda x: x[0] + x[1] * x[4] * math.sqrt(max(0.0, 1.0 - x[2] ** 2))},
-        ]
-        res_c = minimize(
-            lambda x: float(np.mean((svi_total_variance(k, unpack(x)) - w_tgt) ** 2)),
-            np.array([p.a, p.b, p.rho, p.m, p.sigma]), method="SLSQP", constraints=cons,
-            bounds=[(None, None), (1e-10, None), (-0.999, 0.999), (None, None), (1e-8, None)],
-            options=dict(maxiter=500, ftol=1e-15),
-        )
-        p = unpack(res_c.x)
-
-    # Butterfly check (raw SVI with b >= 0 is always convex in k, so convexity
-    # of w is not the relevant test; g(k) is)
-    g_min = float(np.min(svi_butterfly_g(k_arb, p)))
-    if g_min < -1e-6 or p.b * (1.0 + abs(p.rho)) > 2.0 + 1e-9:
-        warnings.warn(
-            f"SVI fit at T={T:.4f} retains butterfly arbitrage (min g = {g_min:.2e})",
-            RuntimeWarning,
-        )
-
+    # --- 5) butterfly check (raw SVI with b >= 0 is always convex in k, so
+    # convexity of w is not the relevant test; g(k) is). Most fits pass and
+    # are returned as they are; the others are refitted under constraints.
+    k_base = _arb_base_grid(float(k.min()), float(k.max()))
+    ok, g_min = _svi_arb_check(p, k_base)
+    if ok:
+        return p
+    p_rep = _svi_repair(k, w_tgt, p, k_base)
+    if p_rep is not None:
+        return p_rep
+    warnings.warn(
+        f"SVI fit at T={T:.4f} could not remove butterfly arbitrage "
+        f"(min g = {g_min:.2e}, b(1+|rho|) = {p.b * (1.0 + abs(p.rho)):.3f}); "
+        "returning the unconstrained fit",
+        RuntimeWarning,
+    )
     return p
 
 def fit_svi_expiry_from_prices(S, r, q, T, K, call_mid):

@@ -263,6 +263,70 @@ def test_fitted_slices_are_butterfly_free(case):
     assert np.sqrt(np.mean((w_fit - iv ** 2 * T) ** 2)) < 3e-3
 
 
+# Review cases (F = 100). Cases 1 and 2 are arbitrage-free SSVI smiles plus
+# 0.3 vol-pt noise; an unchecked, failed SLSQP polish turned them into a
+# collapsed slice (case 1: w ~ 0, IV 0 at every strike) and IVs up to 0.26 off
+# (case 2). Case 3 (one day, sigma ~ 0.01) had g pinned at 1e-4 on a fixed grid
+# of spacing 0.0034 but g = -4.4e-4 between its points, with no warning. Its
+# quotes carry static arbitrage themselves (the call price rises with strike
+# from K = 100.84 to 101.58), so no arbitrage-free smile fits them to better
+# than 1.2 vol pts RMSE, and the best arbitrage-free raw SVI fit (least
+# squares in w) is 8.3 vol pts RMSE: its bounds are set from that.
+_REVIEW_SMILES = {
+    "case1": (3 / 252,
+              [86.386611, 88.047417, 89.740153, 91.465432, 93.22388, 95.016135, 96.842847,
+               98.704677, 100.602302, 102.536409, 104.5077, 106.516889, 108.564706,
+               110.651892, 112.779205],
+              [0.623678, 0.597806, 0.576369, 0.547432, 0.516571, 0.485084, 0.457563,
+               0.421932, 0.388889, 0.342584, 0.310225, 0.268858, 0.232775, 0.198307,
+               0.187125],
+              0.01, 0.01),
+    "case2": (0.5,
+              [75.497457, 80.542965, 85.925665, 91.668093, 97.794287, 104.329896,
+               111.302281, 118.740632, 126.676089],
+              [0.307675, 0.284705, 0.259868, 0.232425, 0.202771, 0.168611, 0.133608,
+               0.097574, 0.090564],
+              0.01, 0.01),
+    "case3": (0.004,
+              [93.745653, 94.432176, 95.123726, 95.820341, 96.522058, 97.228913,
+               97.940945, 98.658191, 99.38069, 100.108479, 100.841599, 101.580087,
+               102.323984, 103.073328, 103.82816],
+              [0.875029, 0.814427, 0.738295, 0.664709, 0.595783, 0.503632, 0.406872,
+               0.287646, 0.216668, 0.286087, 0.399098, 0.555661, 0.698607, 0.822628,
+               0.940389],
+              0.085, 0.175),
+}
+
+
+def _butterfly_status_fine(p, k):
+    """min g on >= 200k points over the quoted range +- 2, log-spaced wings out
+    to |k| = 50 and a fine grid around the vertex; b (1 + |rho|); min w."""
+    lo, hi = k.min() - 2.0, k.max() + 2.0
+    kk = np.concatenate([np.linspace(lo, hi, 200001),
+                         -np.geomspace(-lo, 50.0, 2000), np.geomspace(hi, 50.0, 2000),
+                         p.m + p.sigma * np.linspace(-50.0, 50.0, 20001)])
+    w_min = p.a + p.b * p.sigma * math.sqrt(1.0 - p.rho ** 2)
+    return svi_butterfly_g(kk, p).min(), p.b * (1.0 + abs(p.rho)), w_min
+
+
+@pytest.mark.parametrize("case", ["case1", "case2", "case3"])
+def test_review_smiles_fit_and_are_butterfly_free(case):
+    T, K, iv, rmse_max, err_max = _REVIEW_SMILES[case]
+    K, iv, F = np.array(K), np.array(iv), 100.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        p = fit_svi_expiry_from_ivs(K, iv, T, F)
+    k = np.log(K / F)
+    err = np.sqrt(np.maximum(svi_total_variance(k, p), 0.0) / T) - iv
+    assert np.sqrt(np.mean(err ** 2)) < rmse_max
+    assert np.max(np.abs(err)) < err_max
+    g_min, lee, w_min = _butterfly_status_fine(p, k)
+    assert g_min >= -1e-6
+    assert lee <= 2.0
+    assert w_min > 0.0
+    assert not [c for c in caught if issubclass(c.category, RuntimeWarning)]
+
+
 def test_surface_butterfly_check():
     np.random.seed(5)
     S0, r, q = 100.0, 0.02, 0.0
