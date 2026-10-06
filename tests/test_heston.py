@@ -138,3 +138,37 @@ def test_kappa_zero_matches_small_kappa_and_is_not_black_scholes():
     s0 = heston_smile_prices(S0, 0.02, 0.01, T, Ks, kappa=0.0, **P)
     s9 = heston_smile_prices(S0, 0.02, 0.01, T, Ks, kappa=1e-9, **P)
     assert np.max(np.abs(s0 - s9)) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Regression: small vol-of-vol (cancellation in the characteristic function)
+# ---------------------------------------------------------------------------
+from src.heston import _cumulants_x
+
+
+@pytest.mark.parametrize("sigma, c2_exact", [(3e-5, 0.424995747471),
+                                             (1e-4, 0.424985825195),
+                                             (3e-4, 0.424957477170)])
+def test_small_vol_of_vol_variance_of_log_price(sigma, c2_exact):
+    # heston_charfunc formed beta - d by subtraction and divided it by sigma^2,
+    # so at sigma = 3e-5 the CF had ~2e-7 absolute error and the h = 1e-3
+    # second difference in _cumulants_x returned c2 = 0.8783.
+    # As sigma -> 0, Var(ln S_T) -> E[int_0^T v dt] = 0.425 here. c2_exact is the
+    # second cumulant from the ODEs for the u-expansion of the Riccati solution
+    # (scratch script, DOP853 at rtol 1e-13; no characteristic function).
+    T, kappa, theta, v0, rho = 10.0, 2.0, 0.04, 0.09, 0.7
+    small_sigma_var = theta * T + (v0 - theta) * (-math.expm1(-kappa * T)) / kappa
+    c2 = _cumulants_x(T, 0.0, kappa, theta, sigma, v0, rho, 100.0)[1]
+    assert abs(c2 - small_sigma_var) < 1e-3 * small_sigma_var
+    assert abs(c2 - c2_exact) < 1e-7 * c2_exact
+
+
+def test_small_vol_of_vol_long_maturity_price():
+    # Same cancellation: heston_price returned 25.8586. Reference 25.5546088812:
+    # Lewis (2001) single integral with a cancellation-free CF (scratch script;
+    # adaptive and Gauss-Legendre quadrature agree to 1e-14). Black-Scholes with
+    # the time-averaged variance (the sigma -> 0 limit) gives 25.554547.
+    ref = 25.5546088812
+    P = dict(kappa=2.0, theta=0.04, sigma=3e-5, v0=0.09, rho=0.7)
+    assert abs(heston_price(100.0, 100.0, 10.0, 0.0, **P) - ref) < 1e-6
+    assert abs(heston_smile_prices(100.0, 0.0, 0.0, 10.0, [100.0], **P)[0] - ref) < 1e-6

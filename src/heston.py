@@ -12,25 +12,44 @@ __all__ = [
     "heston_smile_prices",
 ]
 
+def _log1p_complex(z):
+    """
+    Principal log(1 + z) for complex z, accurate for small |z|.
+    np.log1p on complex input takes the real part as log(hypot(1 + Re z, Im z)),
+    whose absolute error stays ~1e-16 however small z is.
+    """
+    zr, zi = np.real(z), np.imag(z)
+    return 0.5 * np.log1p(zr * (2.0 + zr) + zi * zi) + 1j * np.arctan2(zi, 1.0 + zr)
+
 def heston_charfunc(u, T, r, kappa, theta, sigma, v0, rho, S0=1.0):
     """
     Risk-neutral characteristic function of X_T = ln S_T.
     Returns E[exp(i u X_T)].
+
+    Evaluated without cancellation. With beta = kappa - rho sigma i u and
+    d = sqrt(beta^2 + sigma^2 (i u + u^2)), beta - d = -sigma^2 (i u + u^2)/(beta + d), so
+        q = (beta - d)/sigma^2 = -(i u + u^2)/(beta + d),   g = (beta - d)/(beta + d) = sigma^2 q/(beta + d),
+        log((1 - g e^{-dT})/(1 - g)) = log1p(-g e^{-dT}) - log1p(-g),
+        C = i u (ln S0 + r T) + kappa theta [q T - 2 log((1 - g e^{-dT})/(1 - g))/sigma^2],
+        D = q (1 - e^{-dT})/(1 - g e^{-dT}).
+    The textbook form computes beta - d by subtraction and divides it by sigma^2,
+    so its absolute error grows like 1/sigma^2 (3e-7 at sigma = 3e-5, T = 10).
     """
     i = 1j
-    a = kappa * theta
-    b = kappa
-    # At u = 0 with kappa = 0 the closed form is 0/0 (b = d = 0); silence that
+    # At u = 0 with kappa = 0 the closed form is 0/0 (beta = d = 0); silence that
     # warning here and return the exact value phi(0) = E[1] = 1 below.
     with np.errstate(invalid="ignore"):
-        d = np.sqrt((rho * sigma * i * u - b)**2 + (sigma**2) * (i*u + u**2))
-        g = (b - rho*sigma*i*u - d) / (b - rho*sigma*i*u + d)
-        exp_negdT = np.exp(-d*T)
-        C = i*u*(np.log(S0) + r*T) + (a/(sigma**2)) * (
-            (b - rho*sigma*i*u - d)*T - 2.0*np.log((1 - g*exp_negdT)/(1 - g))
-        )
-        D = ((b - rho*sigma*i*u - d)/(sigma**2)) * ((1 - exp_negdT)/(1 - g*exp_negdT))
-        phi = np.exp(C + D*v0)
+        iu = i * u
+        beta = kappa - rho * sigma * iu
+        w = iu + u * u
+        d = np.sqrt(beta * beta + sigma**2 * w)
+        q = -w / (beta + d)                 # (beta - d)/sigma^2
+        g = sigma**2 * q / (beta + d)       # (beta - d)/(beta + d)
+        exp_negdT = np.exp(-d * T)
+        log_ratio = _log1p_complex(-g * exp_negdT) - _log1p_complex(-g)
+        C = iu * (np.log(S0) + r * T) + kappa * theta * (q * T - 2.0 * log_ratio / sigma**2)
+        D = q * (-np.expm1(-d * T)) / (1.0 - g * exp_negdT)
+        phi = np.exp(C + D * v0)
     return np.where(u == 0, 1.0, phi)[()]
 
 def _mean_integrated_variance(T, kappa, theta, v0):
