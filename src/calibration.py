@@ -497,13 +497,14 @@ def calibrate_rbergomi(
             obj = lambda x: _rbergomi_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            # Make finite-diff steps large enough relative to parameter scales by default
+            # Keep SciPy's small absolute finite-difference step (eps=1e-8). The
+            # objective uses common random numbers (fixed seed per maturity) and
+            # an unfloored lognormal variance, so it is a smooth deterministic
+            # function of (H, eta, rho, xi0) and small forward differences give
+            # accurate gradients; 5% relative steps stall the line search.
             _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
-            if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
-                _opt["finite_diff_rel_step"] = 5e-2
-            _opt = _relative_fd_steps(_opt, guess)
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),

@@ -168,14 +168,8 @@ def test_iv_or_nan_accepts_deep_itm_put_below_intrinsic():
     assert abs(_iv_or_nan(S, K, T, r, 0.0, px, "put") - sigma) < 1e-5
 
 
-# ---------------------------------------------------------------------------
-# Regression: the MC calibrators' relative finite-difference step is honoured.
-# SciPy's L-BFGS-B passes `eps` (1e-8) as an absolute step, which overrode the
-# intended 5% relative step, so gradients of the MC objective were taken over
-# 1e-8 parameter moves.
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("model", ["rbergomi", "rough_heston"])
-def test_mc_calibrators_use_relative_fd_steps(model, monkeypatch):
+def _fd_probes(model, monkeypatch, options):
+    """Run one L-BFGS-B iteration and return the forward-difference probes around x0."""
     import src.calibration as cal
     S0, r, q, T = 100.0, 0.01, 0.0, 0.5
     K = np.array([90.0, 100.0, 110.0])
@@ -197,14 +191,86 @@ def test_mc_calibrators_use_relative_fd_steps(model, monkeypatch):
 
     monkeypatch.setattr(cal, name, recording)
     fn([(S0, r, q, T, K, mids, "call")], metric="price", vega_weight=False, x0=tuple(x0),
-       multistart=1, options={"maxiter": 1}, verbose=False, parallel_backend="thread",
+       multistart=1, options=options, verbose=False, parallel_backend="thread",
        n_workers=1, **kw)
-    probes = seen[1:1 + len(x0)]          # forward-difference probes around x0
+    return x0, seen[1:1 + len(x0)]
+
+
+# ---------------------------------------------------------------------------
+# Regression: the rough Heston calibrator's relative finite-difference step is
+# honoured. SciPy's L-BFGS-B passes `eps` (1e-8) as an absolute step, which
+# overrode the intended 5% relative step, so gradients of the MC objective were
+# taken over 1e-8 parameter moves (the variance floor makes the rough Heston
+# objective rough on that scale).
+# ---------------------------------------------------------------------------
+def test_mc_calibrators_use_relative_fd_steps(monkeypatch):
+    x0, probes = _fd_probes("rough_heston", monkeypatch, {"maxiter": 1})
+    assert len(probes) == len(x0)
     for p in probes:
         moved = np.flatnonzero(p != x0)
         assert moved.size == 1
         i = moved[0]
         assert 0.04 < abs(p[i] - x0[i]) / abs(x0[i]) < 0.06
+
+
+# ---------------------------------------------------------------------------
+# Regression: the rBergomi objective uses common random numbers and an
+# unfloored lognormal variance, so it is a smooth deterministic function of
+# (H, eta, rho, xi0). Its gradient must use SciPy's small absolute step
+# (eps=1e-8): 5% forward differences make the L-BFGS-B line search fail.
+# An explicit finite_diff_rel_step is ignored by L-BFGS-B, as on main.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("options", [{"maxiter": 1}, {"maxiter": 1, "finite_diff_rel_step": 5e-2}])
+def test_rbergomi_calibrator_uses_small_fd_steps(options, monkeypatch):
+    x0, probes = _fd_probes("rbergomi", monkeypatch, options)
+    assert len(probes) == len(x0)
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        i = moved[0]
+        assert 0.0 < abs(p[i] - x0[i]) <= 1e-7
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_rbergomi_calibration_converges_from_far_start():
+    # Same synthetic market and CRN seeding as
+    # test_rbergomi_calibration_recovers_params_iv, but started far from the
+    # truth. With small finite-difference steps L-BFGS-B drives the smooth CRN
+    # objective to ~5e-11; with 5% steps it stalled at obj ~2e-4.
+    S0, r, q = 100.0, 0.01, 0.00
+    T = 0.5
+    strikes = np.linspace(70, 130, 13, dtype=float)
+    cp = "call"
+    H_true, eta_true, rho_true, xi0_true = 0.12, 1.40, -0.60, 0.04
+    seed_mkt = 2024
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ST = rbergomi_terminal_parallel_pool(
+            ex, S0=S0, T=T, N=128, n_paths=6000,
+            H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
+            r=r, q=q, base_seed=seed_mkt + int(1000 * T), fgn_method="hybrid", batch_size=750
+        )
+    mids = _prices_from_ST(ST, r, T, strikes, cp=cp)
+    smiles = [(S0, r, q, T, strikes, mids, cp)]
+
+    best, _res = calibrate_rbergomi(
+        smiles,
+        metric="iv",
+        vega_weight=True,
+        x0=(0.20, 1.0, -0.30, 0.05),
+        bounds=((0.05, 0.30), (0.4, 3.0), (-0.95, -0.05), (0.02, 0.08)),
+        mc=dict(N=128, paths=6000, fgn_method="hybrid", batch_size=750, n_workers=4),
+        multistart=1,
+        options={"maxiter": 80},
+        seed=seed_mkt,
+        verbose=False,
+        parallel_backend="thread",
+    )
+
+    assert best["obj"] < 1e-8
+    assert abs(best["H"]   - H_true)   < 2e-3
+    assert abs(best["eta"] - eta_true) < 2e-3
+    assert abs(best["rho"] - rho_true) < 2e-3
+    assert abs(best["xi0"] - xi0_true) < 2e-3
 
 
 def test_heston_calibration_uses_no_deprecated_scipy_options():
