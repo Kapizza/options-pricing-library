@@ -328,13 +328,17 @@ def test_review_smiles_fit_and_are_butterfly_free(case):
 
 
 def test_surface_butterfly_check():
-    np.random.seed(5)
+    # Inputs from the b = 0.75 smile, which has butterfly arbitrage (g < 0 for
+    # k in [-1.31, -0.38]). The arbitrage-free b = 0.6 fixture could not catch
+    # a fitter that leaves arbitrage in place: main's passed it (min g +0.009)
+    # but gives -0.083 here.
     S0, r, q = 100.0, 0.02, 0.0
+    bad = SVIParams(a=0.015, b=0.75, rho=-0.45, m=0.0, sigma=0.22)
     chains = {}
     for T in (0.1, 0.25, 0.5, 1.0):
         K = np.linspace(70, 130, 41)
-        iv, _ = _make_synthetic_chain_iv(S0, r, q, T, K)
-        chains[T] = {"K": K, "iv": iv}
+        k = np.log(K / (S0 * math.exp((r - q) * T)))
+        chains[T] = {"K": K, "iv": np.sqrt(svi_total_variance(k, bad) / T)}
     surf = fit_svi_surface(chains, S0=S0, r=r, q=q, mode="iv")
     g = surf.butterfly_g()
     assert g.shape == surf.w_grid.shape
