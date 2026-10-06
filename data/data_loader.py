@@ -9,9 +9,11 @@ def fetch_stock_data(ticker, start="2020-01-01", end=None):
     return df
 
 def _close_series(stock_data):
-    """'Close' column as a Series, for flat or (Price, Ticker) MultiIndex columns."""
+    """'Close' column as a Series, for flat or single-ticker (Price, Ticker) MultiIndex columns."""
     close = stock_data['Close']
     if isinstance(close, pd.DataFrame):
+        if close.shape[1] != 1:
+            raise ValueError(f"expected data for one ticker, got 'Close' columns {list(close.columns)}")
         close = close.iloc[:, 0]
     return close
 
