@@ -280,8 +280,13 @@ def _svi_repair(k, w_tgt, p_free, k_base, g_margin=1e-4):
 
     best, best_f = None, np.inf
     for x0 in starts:
-        res = minimize(objective, x0 / scale, method="SLSQP", bounds=bounds,
-                       constraints=cons, options=dict(maxiter=300, ftol=1e-12))
+        with warnings.catch_warnings():
+            # SciPy < 1.16 notes every bound-clipped SLSQP step; the result
+            # is still checked below, so this notice is noise for callers
+            warnings.filterwarnings("ignore", message="Values in x were outside bounds",
+                                    category=RuntimeWarning)
+            res = minimize(objective, x0 / scale, method="SLSQP", bounds=bounds,
+                           constraints=cons, options=dict(maxiter=300, ftol=1e-12))
         if not res.success or not np.all(np.isfinite(res.x)) or res.fun >= best_f:
             continue
         p = unpack(res.x)
