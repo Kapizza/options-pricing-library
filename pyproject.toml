@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "options-pricing-library"
 version = "0.1.0"
 description = "Option pricing, Greeks, volatility models, calibration and risk tools"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
