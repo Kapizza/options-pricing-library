@@ -49,7 +49,8 @@ For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma,
   - Standard strategies (spreads, straddles, strangles, collars, butterflies);
     note `butterfly_spread(S, K1, K2, K3, r, T, sigma)` takes `r` before `T`
   - Payoff diagrams; portfolio aggregation and stress grids
-  - VaR/ES (historical and Monte Carlo, one-day horizon) and P&L attribution
+  - VaR/ES (historical and Monte Carlo, one-day horizon; the Monte Carlo methods include one day of
+    theta carry, historical VaR shocks the spot only) and P&L attribution
 
 - Barriers and digitals
   - Barrier pricing via MC with Brownian-bridge crossing probabilities, checked against
@@ -68,7 +69,7 @@ For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma,
 ```bash
 pip install -r requirements.txt          # or: pip install -e ".[data,notebooks,dev]"
 pytest                                   # full suite
-pytest -m "not slow"                     # skip the long Monte Carlo tests
+pytest -m "not slow"                     # skip tests marked slow; CI runs this on every push
 ```
 
 Run the notebooks from the `notebooks/` directory. Notebooks 08, 09, 13, 14 (live cell), 17, 20 and 21
