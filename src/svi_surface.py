@@ -57,6 +57,8 @@ def svi_butterfly_g(k_array, p):
         g(k) = (1 - k w'/(2w))^2 - (w'^2/4) (1/w + 1/4) + w''/2.
     The slice is free of butterfly arbitrage iff g(k) >= 0 for all k
     (together with the Roger Lee wing bound b(1 + |rho|) <= 2).
+    Where w(k) <= 0 the slice is itself arbitrageable (total variance cannot
+    be negative), and g is returned as -inf there.
     """
     k = np.asarray(k_array, dtype=float)
     x = k - p.m
@@ -64,8 +66,9 @@ def svi_butterfly_g(k_array, p):
     w = p.a + p.b * (p.rho * x + sq)
     w1 = p.b * (p.rho + x / sq)
     w2 = p.b * p.sigma * p.sigma / sq ** 3
-    w = np.maximum(w, 1e-300)
-    return (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        g = (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
+    return np.where(w > 0.0, g, -np.inf)
 
 
 def _feasible_raw_svi(p, eps=1e-12):
@@ -351,15 +354,18 @@ class SVISurface:
         """
         Gatheral-Jacquier g(k) on the stitched grid, per tenor (finite
         differences in k); shape (M, len(k_grid)). Values >= 0 mean no
-        butterfly arbitrage. The two edge points of each row are not reliable.
+        butterfly arbitrage; g is -inf where w <= 0. The two edge points of
+        each row are not reliable.
         """
         k = self.k_grid
         g = np.empty_like(self.w_grid)
         for m in range(len(self.tenors)):
-            w = np.maximum(self.w_grid[m], 1e-300)
+            w = self.w_grid[m]
             w1 = np.gradient(w, k)
             w2 = np.gradient(w1, k)
-            g[m] = (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                g_m = (1.0 - k * w1 / (2.0 * w)) ** 2 - 0.25 * w1 * w1 * (1.0 / w + 0.25) + 0.5 * w2
+            g[m] = np.where(w > 0.0, g_m, -np.inf)
         return g
 
     def iv(self, k_array, T):

@@ -1,5 +1,6 @@
 # tests/test_svi_surface.py
 import math
+import warnings
 import numpy as np
 import pytest
 
@@ -192,7 +193,7 @@ def test_fit_from_prices_with_dividend_yield():
 # Regression: butterfly (density) no-arbitrage, Gatheral & Jacquier (2014)
 # g(k) = (1 - k w'/(2w))^2 - w'^2/4 (1/w + 1/4) + w''/2 >= 0
 # ---------------------------------------------------------------------------
-from src.svi_surface import svi_butterfly_g
+from src.svi_surface import SVISurface, svi_butterfly_g
 
 # Gatheral & Jacquier (2014), Example 3.1 (Axel Vogt): a raw SVI slice with
 # butterfly arbitrage, T = 1.
@@ -204,6 +205,41 @@ def test_butterfly_g_flags_known_arbitrage():
     assert svi_butterfly_g(k, _VOGT).min() < -0.02
     good = SVIParams(a=0.04, b=0.4, rho=-0.4, m=0.0, sigma=0.2)
     assert svi_butterfly_g(k, good).min() > 0.0
+
+
+def test_butterfly_g_flags_nonpositive_variance():
+    # w(k) = -0.05 + 0.5 sqrt(k^2 + 0.05^2) is negative for |k| < 0.0866.
+    # Negative total variance is itself an arbitrage, so g must flag it; w was
+    # clamped to 1e-300, which gave g = +inf, 6.0, +inf at k = -0.05, 0, 0.05.
+    p = SVIParams(a=-0.05, b=0.5, rho=0.0, m=0.0, sigma=0.05)
+    k = np.array([-0.2, -0.05, 0.0, 0.05, 0.2])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        g = svi_butterfly_g(k, p)
+    assert np.all(svi_total_variance(k[1:4], p) < 0.0)
+    assert np.all(np.isneginf(g[1:4]))
+    # where w > 0, g is unchanged: compare with finite differences of w
+    h = 1e-4
+    kk = k[[0, 4]]
+    w0 = svi_total_variance(kk, p)
+    wp, wm = svi_total_variance(kk + h, p), svi_total_variance(kk - h, p)
+    w1, w2 = (wp - wm) / (2 * h), (wp - 2 * w0 + wm) / h ** 2
+    g_fd = (1 - kk * w1 / (2 * w0)) ** 2 - w1 ** 2 / 4 * (1 / w0 + 0.25) + w2 / 2
+    assert np.allclose(g[[0, 4]], g_fd, rtol=1e-6)
+    assert np.allclose(g[[0, 4]], -1.0442114, atol=1e-6)
+    assert not [c for c in caught if issubclass(c.category, RuntimeWarning)]
+
+    # the stitched-surface version: rows are clipped at w = 0 by the convexity
+    # repair, and those points must be flagged too, not reported as g = 1 or inf
+    kg = np.linspace(-0.5, 0.5, 101)
+    w_row = np.maximum(svi_total_variance(kg, p), 0.0)
+    surf = SVISurface(tenors=np.array([1.0]), params=[p], k_grid=kg, w_grid=w_row[None, :])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        gs = surf.butterfly_g()[0]
+    assert np.all(np.isneginf(gs[w_row <= 0.0]))
+    assert np.all(np.isfinite(gs[w_row > 0.0]))
+    assert not [c for c in caught if issubclass(c.category, RuntimeWarning)]
 
 
 @pytest.mark.parametrize("case", ["vogt", "repo_smile"])
