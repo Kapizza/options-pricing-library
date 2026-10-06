@@ -8,14 +8,21 @@
 #   - fit_svi_expiry_from_prices(...)
 #   - stitch_no_arb_calendar(...)
 #   - fit_svi_surface(chains_by_expiry, S0, r, q, mode="auto")
-#   - SVISurface (iv(k, T), w(k, T))
+#   - SVISurface (iv(k, T), w(k, T), butterfly_g())
+#   - svi_butterfly_g(k, p)
 #
 # Notes:
-#   * Calendar no-arb: enforce monotonicity of w/T in T via isotonic regression,
-#     evaluated on a fixed log-moneyness grid. This removes calendar arbitrage.
-#   * Static butterfly no-arb: we apply feasibility constraints + a numeric
-#     convexity check on w(k). It’s a pragmatic guard; for production you may
-#     add the closed-form density-positivity conditions as well.
+#   * Calendar no-arb: total variance w(k, T) is made non-decreasing in T by
+#     isotonic regression at each k of a fixed log-moneyness grid; each row is
+#     then made convex in k (isotonic regression on its slopes).
+#   * Butterfly no-arb, per expiry: each fitted slice is checked against the
+#     Gatheral-Jacquier condition g(k) >= 0, Roger Lee's wing bound
+#     b (1 + |rho|) <= 2 and w > 0, with g checked on a dense grid out to
+#     |k| = 50 that also resolves the smile's vertex. A slice that fails is
+#     refitted by SLSQP under these constraints; if no refit passes, the
+#     unconstrained fit is returned with a RuntimeWarning.
+#     SVISurface.butterfly_g reports g on the stitched grid, which the
+#     calendar step can change.
 # -----------------------------------------------------------------------------
 
 import math
@@ -150,9 +157,9 @@ def _map_unconstrained_to_svi(theta):
 # A raw-SVI slice is free of butterfly arbitrage iff g(k) >= 0 for all k (see
 # svi_butterfly_g), Roger Lee's wing bound b (1 + |rho|) <= 2 holds and
 # w(k) > 0. g is checked out to |k| = 50 on a grid that is dense over the
-# quoted range +- 2 and also resolves the smile's vertex: a short-dated slice
-# has sigma ~ 0.01, below the spacing of a fixed grid, and g can dip below 0
-# between fixed grid points there.
+# quoted range +- 2 and also resolves the smile's vertex: g varies on the scale
+# sigma there, and a short-dated slice has sigma ~ 0.01, only a few spacings
+# of a fixed grid, so g can dip below 0 between the fixed grid points.
 
 _ARB_K_MAX = 50.0
 # vertex grid m + sigma * u: 401 points on [-50, 50], uniform in asinh(u), so
@@ -291,6 +298,20 @@ def fit_svi_expiry_from_ivs(K, iv, T, F):
       2) L-BFGS-B polish (Huber)
       3) L-BFGS-B polish (pure MSE on total variance)
       4) 1-D Brent on 'c' (controls 'a') for final level alignment
+      5) Butterfly check: g(k) >= 0 (Gatheral-Jacquier), b (1 + |rho|) <= 2
+         (Roger Lee) and min w > 0, with g on a dense grid over the quoted
+         range +- 2, log-spaced wings out to |k| = 50 and a grid around the
+         smile's vertex, refined near its lowest values. A fit that passes
+         is returned as it is.
+      6) Otherwise, a constrained refit: SLSQP least squares in w subject to
+         g >= 1e-4 on that grid, Lee's bound and min w > 0, started from the
+         step-4 fit and from data-scaled guesses. Only refits that SLSQP
+         reports as successful and that pass the step-5 check are accepted;
+         the one with the smallest error is returned.
+      7) If no refit is accepted, the step-4 fit is returned with a
+         RuntimeWarning that butterfly arbitrage could not be removed.
+    Quotes whose strike or implied vol is not finite are dropped with a
+    RuntimeWarning; fewer than 3 remaining quotes raise ValueError.
     """
     K = np.asarray(K, dtype=float)
     iv = np.asarray(iv, dtype=float)

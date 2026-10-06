@@ -35,8 +35,10 @@ For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma,
     (Volterra Euler scheme)
 
 - SVI volatility surfaces
-  - Raw-SVI per-expiry fits with butterfly no-arbitrage enforced
-    (Gatheral–Jacquier `g(k) >= 0` and Roger Lee's wing bound)
+  - Raw-SVI per-expiry fits; butterfly arbitrage (Gatheral–Jacquier
+    `g(k) >= 0`, Roger Lee's wing bound, `w > 0`) is checked on a dense grid
+    out to `|k| = 50` and removed by a constrained refit when present
+    (`RuntimeWarning` if it cannot be)
   - Calendar stitching (total variance non-decreasing in maturity) and flat-IV
     extrapolation outside the quoted maturities
   - Plots of smiles and surfaces in notebook 15
