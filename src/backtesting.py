@@ -10,13 +10,17 @@ from src.black_scholes import black_scholes_price
 # --- utilities ---------------------------------------------------------------------------
 
 def year_fraction(date, expiry, day_count='ACT/365'):
-    """Compute T in years from date→expiry. Supports 'ACT/365' (default) or 'ACT/252'."""
+    """Compute T in years from date→expiry. Supports 'ACT/365' (default) or 'ACT/252'
+    ('ACT/252' counts business days, Mon-Fri without a holiday calendar, over 252)."""
     d = pd.to_datetime(expiry) - pd.to_datetime(date)
     days = float(getattr(d, 'days', np.nan))
     if not np.isfinite(days):
         return np.nan
     if str(day_count).upper().startswith('ACT/252'):
-        return max(0.0, days / 252.0)
+        if days <= 0:
+            return 0.0
+        bdays = np.busday_count(pd.to_datetime(date).date(), pd.to_datetime(expiry).date())
+        return max(0.0, bdays / 252.0)
     return max(0.0, days / 365.0)
 
 

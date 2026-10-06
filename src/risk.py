@@ -68,7 +68,7 @@ def price_position(pos):
     """Return position value in portfolio units."""
     p = bs_price(
         pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"],
-        pos.get("option", "call")
+        pos.get("option", "call"), q=pos.get("q", 0.0)
     )
     return pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos) * p
 
@@ -77,12 +77,13 @@ def greeks_position(pos):
     """Scaled Greeks (Δ, Γ, ν, Θ, ρ) for one position in portfolio units."""
     S, K, T, r_, sig = pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"]
     opt = pos.get("option", "call")
+    q_ = pos.get("q", 0.0)
     g = {
-        "delta": delta(S, K, T, r_, sig, opt),
-        "gamma": gamma(S, K, T, r_, sig),
-        "vega":  vega(S, K, T, r_, sig),          # per 1.00 vol (×0.01 for 1 vol-pt)
-        "theta": theta(S, K, T, r_, sig, opt),     # per year
-        "rho":   rho(S, K, T, r_, sig, opt),       # per 1.00 rate
+        "delta": delta(S, K, T, r_, sig, opt, q=q_),
+        "gamma": gamma(S, K, T, r_, sig, q=q_),
+        "vega":  vega(S, K, T, r_, sig, q=q_),          # per 1.00 vol (×0.01 for 1 vol-pt)
+        "theta": theta(S, K, T, r_, sig, opt, q=q_),     # per year
+        "rho":   rho(S, K, T, r_, sig, opt, q=q_),       # per 1.00 rate
     }
     m = pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos)
     return {k: m * v for k, v in g.items()}
@@ -91,7 +92,11 @@ def greeks_position(pos):
 def higher_greeks_position(pos):
     """Vanna/Volga in portfolio units."""
     S, K, T, r_, sig = pos["S"], pos["K"], pos["T"], pos["r"], pos["sigma"]
-    hv = vanna_volga(S, K, T, r_, sig)  # {"vanna": ..., "volga": ...}
+    q_ = pos.get("q", 0.0)
+    if _vanna_volga_ext is not None:
+        hv = _vanna_volga_ext(S, K, T, r_, sig, q=q_)  # {"vanna": ..., "volga": ...}
+    else:
+        hv = vanna_volga(S, K, T, r_, sig)
     m = pos.get("side", 1.0) * pos.get("quantity", 1.0) * _mult(pos)
     return {"vanna": m * hv["vanna"], "volga": m * hv["volga"]}
 
@@ -114,9 +119,12 @@ def aggregate_greeks(positions):
 # Scenario shocks
 # ------------------------
 def scenario_pnl_delta_gamma(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
-    """Taylor P&L: Δ, Γ, ν, ρ, Θ. dSigma absolute (0.01 = +1 vol-pt), dT in years."""
+    """Taylor P&L: Δ, Γ, ν, ρ, Θ. dSigma absolute (0.01 = +1 vol-pt).
+    dT is the change in time-to-maturity in years (e.g. -1/252 when one day
+    passes), the same convention as scenario_revalue. Theta is dV/dt, so the
+    time term is -theta * dT."""
     g = aggregate_greeks(positions)
-    return g["delta"] * dS + 0.5 * g["gamma"] * dS**2 + g["vega"] * dSigma + g["rho"] * dR + g["theta"] * dT
+    return g["delta"] * dS + 0.5 * g["gamma"] * dS**2 + g["vega"] * dSigma + g["rho"] * dR - g["theta"] * dT
 
 
 def scenario_revalue(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
@@ -138,17 +146,19 @@ def scenario_revalue(positions, dS=0.0, dSigma=0.0, dR=0.0, dT=0.0):
 # ------------------------
 def pnl_attribution_first_order(positions, S0, sigma0, r0, T0, S1, sigma1, r1, T1):
     """
-    P&L attribution using pathwise full revaluation with Shapley-style averaging over two orders:
+    P&L attribution by sequential full revaluation, averaged over two orders:
         Order A: S -> sigma -> r -> T
         Order B: sigma -> S -> r -> T
+    (only S and sigma are permuted; r and T are always applied last).
 
     Key details:
-      • Each leg keeps its own starting sigma_i0 = pos["sigma"].
-      • We apply a uniform vol shock dSigma = (sigma1 - sigma0) to every leg:
-          sigma_i, end = sigma_i0 + dSigma
-      • S, r, T are shocked to (S1, r1, T1) as given.
-      • Components are computed by full repricing after each step, then averaged across the two orders.
-      • This makes residual ≈ 0 up to float noise and passes strict tests.
+      • Every leg starts from its own state (pos["S"], pos["sigma"], pos["r"], pos["T"]).
+      • The shocks are moves applied to every leg:
+          dS = S1 - S0, dSigma = sigma1 - sigma0, dR = r1 - r0, dT = T1 - T0,
+        e.g. T_i, end = T_i + dT, so legs with different maturities are handled.
+      • Components are computed by full repricing after each step, then averaged
+        across the two orders. The components telescope, so the residual is zero
+        up to float noise by construction; it is not an accuracy measure.
     """
     # Global shocks
     dS     = float(S1)     - float(S0)
@@ -160,13 +170,14 @@ def pnl_attribution_first_order(positions, S0, sigma0, r0, T0, S1, sigma1, r1, T
     sig0 = [float(p["sigma"]) for p in positions]
 
     def price_with(Sv, rv, Tv, add_sigma):
-        """Full portfolio price for state (S=Sv, r=rv, T=Tv) and per-leg sigma_i = sigma_i0 + add_sigma."""
+        """Full portfolio price with each leg's S, r, T moved by (Sv-S0, rv-r0, Tv-T0)
+        and per-leg sigma_i = sigma_i0 + add_sigma."""
         total = 0.0
         for p, s0 in zip(positions, sig0):
             q = dict(p)
-            q["S"] = Sv
-            q["r"] = rv
-            q["T"] = max(1e-8, Tv)
+            q["S"] = float(p["S"]) + (Sv - float(S0))
+            q["r"] = float(p["r"]) + (rv - float(r0))
+            q["T"] = max(1e-8, float(p["T"]) + (Tv - float(T0)))
             q["sigma"] = max(1e-8, s0 + add_sigma)
             total += price_position(q)
         return total
@@ -262,7 +273,8 @@ def historical_var_es(returns, positions, alpha=0.99):
 
 
 def mc_var_es(positions, n_sims=50000, mu=0.0, sigma_ret=0.02, alpha=0.99, method="delta_gamma", seed=42):
-    """Monte Carlo VaR/ES (delta-gamma or full repricing)."""
+    """Monte Carlo VaR/ES (delta-gamma or full repricing) over a one-day horizon.
+    Both methods include one day of time decay."""
     rng = np.random.default_rng(seed)
     rets = rng.normal(mu, sigma_ret, size=n_sims)
     pnl = np.zeros(n_sims)
@@ -281,6 +293,7 @@ def mc_var_es(positions, n_sims=50000, mu=0.0, sigma_ret=0.02, alpha=0.99, metho
             for pos in positions:
                 q = dict(pos)
                 q["S"] = pos["S"] * (1.0 + r_)
+                q["T"] = max(1e-8, pos["T"] - 1.0 / 252.0)  # one day of decay, as in delta_gamma
                 after += price_position(q)
             pnl[i] = after - base
 

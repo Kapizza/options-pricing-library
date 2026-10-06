@@ -80,3 +80,50 @@ def test_stress_grid_contains_base_and_shapes(positions):
     base = df[(df["S_move"] == 0.0) & (df["vol_move"] == 0.0) & (df["r_move"] == 0.0)]
     assert len(base) == 1
     assert abs(float(base["PnL"].iloc[0])) < 1e-8
+
+
+def test_pnl_attribution_respects_each_legs_maturity():
+    # Calendar spread: the two legs have different T. Attribution must move
+    # each leg from its own state, so the total equals the full-revaluation P&L.
+    cal = [
+        {"option": "call", "side": +1, "quantity": 1, "S": 100.0, "K": 100.0, "T": 1.00, "r": 0.03, "sigma": 0.20, "multiplier": 100},
+        {"option": "call", "side": -1, "quantity": 1, "S": 100.0, "K": 100.0, "T": 0.25, "r": 0.03, "sigma": 0.20, "multiplier": 100},
+    ]
+    d = 1.0 / 252.0
+    S0, s0, r0, T0 = 100.0, 0.20, 0.03, 0.25
+    S1, s1, r1, T1 = 101.0, 0.21, 0.031, 0.25 - d
+    out = risk.pnl_attribution_first_order(cal, S0, s0, r0, T0, S1, s1, r1, T1)
+    before = sum(risk.price_position(p) for p in cal)
+    after = sum(risk.price_position(dict(p, S=p["S"] + 1.0, sigma=p["sigma"] + 0.01,
+                                         r=p["r"] + 0.001, T=p["T"] - d)) for p in cal)
+    assert abs(out["total"] - (after - before)) < 1e-8
+    assert abs(out["delta"] + out["vega"] + out["rho"] + out["theta"] + out["residual"] - out["total"]) < 1e-8
+
+
+def test_taylor_and_full_reval_agree_on_time_decay(positions):
+    # dT is the change in time-to-maturity in both functions (-1/252: a day passes)
+    dT = -1.0 / 252.0
+    taylor = risk.scenario_pnl_delta_gamma(positions, dT=dT)
+    full = risk.scenario_revalue(positions, dT=dT)
+    assert full < 0.0
+    assert taylor == pytest.approx(full, rel=0.02)
+
+
+def test_mc_var_methods_use_the_same_horizon(positions):
+    # With (almost) no spot moves both methods should report the one-day carry.
+    params = dict(n_sims=2000, mu=0.0, sigma_ret=1e-9, alpha=0.99, seed=3)
+    dg = risk.mc_var_es(positions, method="delta_gamma", **params)
+    fr = risk.mc_var_es(positions, method="full_reval", **params)
+    assert np.mean(dg["pnl_samples"]) == pytest.approx(np.mean(fr["pnl_samples"]), rel=0.02)
+
+
+def test_positions_use_their_dividend_yield():
+    from src.black_scholes import black_scholes_price
+    from src.greeks import delta, vanna_volga
+    pos = {"option": "call", "side": +1, "quantity": 2, "S": 100.0, "K": 100.0, "T": 0.5,
+           "r": 0.03, "sigma": 0.2, "q": 0.05, "multiplier": 100}
+    m = 200.0
+    assert risk.price_position(pos) == pytest.approx(m * black_scholes_price(100, 100, 0.5, 0.03, 0.2, "call", q=0.05))
+    assert risk.greeks_position(pos)["delta"] == pytest.approx(m * float(delta(100, 100, 0.5, 0.03, 0.2, "call", q=0.05)))
+    hv = vanna_volga(100, 100, 0.5, 0.03, 0.2, q=0.05)
+    assert risk.higher_greeks_position(pos)["vanna"] == pytest.approx(m * float(hv["vanna"]))

@@ -6,7 +6,8 @@ import pytest
 
 from src.calibration import calibrate_rbergomi, calibrate_rough_heston
 
-from src.rough import rbergomi_paths
+from src.rough import rbergomi_paths, rbergomi_terminal_parallel_pool
+from concurrent.futures import ThreadPoolExecutor
 from src.rough import rough_heston_paths
 
 
@@ -31,14 +32,16 @@ def test_rbergomi_calibration_recovers_params_iv():
     cp = "call"
     H_true, eta_true, rho_true, xi0_true = 0.12, 1.40, -0.60, 0.04
 
-    # generate one MC set and reuse for all strikes (CRN)
+    # generate one MC set and reuse for all strikes (CRN). The calibration
+    # simulates with base_seed = seed + int(1000*T) split into batches, so the
+    # market must be drawn the same way for the random numbers to be common.
     seed_mkt = 2024
-    t, S_paths, V_paths = rbergomi_paths(
-        S0=S0, T=T, N=128, n_paths=6000,
-        H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
-        r=r, q=q, seed=seed_mkt, fgn_method="davies-harte"
-    )
-    ST = S_paths[:, -1]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ST = rbergomi_terminal_parallel_pool(
+            ex, S0=S0, T=T, N=128, n_paths=6000,
+            H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
+            r=r, q=q, base_seed=seed_mkt + int(1000 * T), fgn_method="hybrid", batch_size=750
+        )
     mids = _prices_from_ST(ST, r, T, strikes, cp=cp)
     smiles = [(S0, r, q, T, strikes, mids, cp)]
 
@@ -49,7 +52,7 @@ def test_rbergomi_calibration_recovers_params_iv():
         vega_weight=True,
         x0=(0.11, 1.35, -0.55, 0.038),                 # close-ish start
         bounds=((0.05, 0.30), (0.4, 3.0), (-0.95, -0.05), (0.02, 0.08)),  # keep H off edges
-        mc=dict(N=128, paths=6000, fgn_method="davies-harte"),
+        mc=dict(N=128, paths=6000, fgn_method="hybrid", batch_size=750, n_workers=4),
         multistart=2,
         options={"maxiter": 80},
         seed=seed_mkt,                                   # CRN with market mids
@@ -120,7 +123,7 @@ def test_smoke_iv_mode_and_progress_history():
     t, S_paths, V_paths = rbergomi_paths(
         S0=S0, T=T, N=64, n_paths=2500,
         H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
-        r=r, q=q, seed=999, fgn_method="davies-harte"
+        r=r, q=q, seed=999, fgn_method="hybrid"
     )
     ST = S_paths[:, -1]
     mids = _prices_from_ST(ST, r, T, K, cp=cp)
@@ -131,7 +134,7 @@ def test_smoke_iv_mode_and_progress_history():
         metric="iv",
         vega_weight=True,
         x0=(0.10, 1.3, -0.45, 0.035),
-        mc=dict(N=64, paths=2500, fgn_method="davies-harte"),
+        mc=dict(N=64, paths=2500, fgn_method="hybrid"),
         multistart=1,
         options={"maxiter": 12},
         verbose=True,        # exercise the monitor
@@ -142,3 +145,178 @@ def test_smoke_iv_mode_and_progress_history():
     assert "history" in best and isinstance(best["history"], list)
     # iteration history should have at least one item if maxiter > 0
     assert len(best["history"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: market/model IV inversion with a dividend yield
+# ---------------------------------------------------------------------------
+from src.calibration import _iv_or_nan
+from src.black_scholes import black_scholes_price
+
+
+@pytest.mark.parametrize("cp", ["call", "put"])
+def test_iv_or_nan_roundtrip_with_dividends(cp):
+    S, T, r, q, sigma = 100.0, 0.5, 0.04, 0.03, 0.25
+    for K in (80.0, 100.0, 120.0):
+        px = black_scholes_price(S, K, T, r, sigma, cp, q=q)
+        assert abs(_iv_or_nan(S, K, T, r, q, px, cp) - sigma) < 1e-5
+
+
+def test_iv_or_nan_accepts_deep_itm_put_below_intrinsic():
+    S, K, T, r, sigma = 60.0, 100.0, 1.0, 0.05, 0.2
+    px = black_scholes_price(S, K, T, r, sigma, "put")
+    assert abs(_iv_or_nan(S, K, T, r, 0.0, px, "put") - sigma) < 1e-5
+
+
+def _fd_probes(model, monkeypatch, options):
+    """Run one L-BFGS-B iteration and return the forward-difference probes around x0."""
+    import src.calibration as cal
+    S0, r, q, T = 100.0, 0.01, 0.0, 0.5
+    K = np.array([90.0, 100.0, 110.0])
+    mids = np.array([11.0, 5.5, 2.0])
+    seen = []
+    if model == "rbergomi":
+        name, fn = "_rbergomi_objective", cal.calibrate_rbergomi
+        x0 = np.array([0.12, 1.4, -0.6, 0.04])
+        kw = dict(mc=dict(N=16, paths=400, fgn_method="hybrid"))
+    else:
+        name, fn = "_rough_heston_objective", cal.calibrate_rough_heston
+        x0 = np.array([0.04, 1.5, 0.04, 1.0, -0.6, 0.12])
+        kw = dict(mc=dict(N=16, paths=400, batch_size=400))
+    orig = getattr(cal, name)
+
+    def recording(params, *a, **k):
+        seen.append(np.array(params, dtype=float))
+        return orig(params, *a, **k)
+
+    monkeypatch.setattr(cal, name, recording)
+    fn([(S0, r, q, T, K, mids, "call")], metric="price", vega_weight=False, x0=tuple(x0),
+       multistart=1, options=options, verbose=False, parallel_backend="thread",
+       n_workers=1, **kw)
+    return x0, seen[1:1 + len(x0)]
+
+
+# ---------------------------------------------------------------------------
+# Regression: the rough Heston calibrator's relative finite-difference step is
+# honoured. SciPy's L-BFGS-B passes `eps` (1e-8) as an absolute step, which
+# overrode the intended 5% relative step, so gradients of the MC objective were
+# taken over 1e-8 parameter moves (the variance floor makes the rough Heston
+# objective rough on that scale).
+# ---------------------------------------------------------------------------
+def test_mc_calibrators_use_relative_fd_steps(monkeypatch):
+    x0, probes = _fd_probes("rough_heston", monkeypatch, {"maxiter": 1})
+    assert len(probes) == len(x0)
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        i = moved[0]
+        assert 0.04 < abs(p[i] - x0[i]) / abs(x0[i]) < 0.06
+
+
+# ---------------------------------------------------------------------------
+# Regression: the rBergomi objective uses common random numbers and an
+# unfloored lognormal variance, so it is a smooth deterministic function of
+# (H, eta, rho, xi0). Its gradient must use SciPy's small absolute step
+# (eps=1e-8): 5% forward differences make the L-BFGS-B line search fail.
+# An explicit finite_diff_rel_step is ignored by L-BFGS-B, as on main.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("options", [{"maxiter": 1}, {"maxiter": 1, "finite_diff_rel_step": 5e-2}])
+def test_rbergomi_calibrator_uses_small_fd_steps(options, monkeypatch):
+    x0, probes = _fd_probes("rbergomi", monkeypatch, options)
+    assert len(probes) == len(x0)
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        i = moved[0]
+        assert 0.0 < abs(p[i] - x0[i]) <= 1e-7
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_rbergomi_calibration_converges_from_far_start():
+    # Same synthetic market and CRN seeding as
+    # test_rbergomi_calibration_recovers_params_iv, but started far from the
+    # truth. With small finite-difference steps L-BFGS-B drives the smooth CRN
+    # objective to ~5e-11; with 5% steps it stalled at obj ~2e-4.
+    S0, r, q = 100.0, 0.01, 0.00
+    T = 0.5
+    strikes = np.linspace(70, 130, 13, dtype=float)
+    cp = "call"
+    H_true, eta_true, rho_true, xi0_true = 0.12, 1.40, -0.60, 0.04
+    seed_mkt = 2024
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ST = rbergomi_terminal_parallel_pool(
+            ex, S0=S0, T=T, N=128, n_paths=6000,
+            H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
+            r=r, q=q, base_seed=seed_mkt + int(1000 * T), fgn_method="hybrid", batch_size=750
+        )
+    mids = _prices_from_ST(ST, r, T, strikes, cp=cp)
+    smiles = [(S0, r, q, T, strikes, mids, cp)]
+
+    best, _res = calibrate_rbergomi(
+        smiles,
+        metric="iv",
+        vega_weight=True,
+        x0=(0.20, 1.0, -0.30, 0.05),
+        bounds=((0.05, 0.30), (0.4, 3.0), (-0.95, -0.05), (0.02, 0.08)),
+        mc=dict(N=128, paths=6000, fgn_method="hybrid", batch_size=750, n_workers=4),
+        multistart=1,
+        options={"maxiter": 80},
+        seed=seed_mkt,
+        verbose=False,
+        parallel_backend="thread",
+    )
+
+    assert best["obj"] < 1e-8
+    assert abs(best["H"]   - H_true)   < 2e-3
+    assert abs(best["eta"] - eta_true) < 2e-3
+    assert abs(best["rho"] - rho_true) < 2e-3
+    assert abs(best["xi0"] - xi0_true) < 2e-3
+
+
+def test_heston_calibration_uses_no_deprecated_scipy_options():
+    import warnings
+    from src.calibration import calibrate_heston
+    from src.heston import heston_smile_prices
+    K = np.array([90.0, 100.0, 110.0])
+    mids = heston_smile_prices(100.0, 0.01, 0.0, 0.5, K, kappa=2.0, theta=0.04, sigma=0.5, v0=0.04, rho=-0.6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        calibrate_heston([(100.0, 0.01, 0.0, 0.5, K, mids, "call")], metric="price", vega_weight=False,
+                         multistart=1, options={"maxiter": 2}, verbose=False)
+
+
+@pytest.mark.filterwarnings("error::ResourceWarning")
+# an unclosed file warns from a finalizer, which pytest re-raises as this
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_calibration_cache_is_invalidated_by_model_version(tmp_path, monkeypatch):
+    # Cached results computed with older model numerics must not be reused.
+    import src.calibration as cal
+    calls = []
+
+    def fake_calibrate(smiles, **kw):
+        calls.append(1)
+        return {"obj": 0.5, "x": len(calls)}, None
+
+    kw = dict(smiles=[(100.0, 0.0, 0.0, 0.5, [100.0], [5.0], "call")], metric="price", vega_weight=False,
+              x0=(0.1,), mc={}, cache_dir=str(tmp_path))
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    assert len(calls) == 1                                   # second call is a cache hit
+    monkeypatch.setattr(cal, "_MODEL_VERSION", cal._MODEL_VERSION + 1)
+    cal.calibrate_cached("dummy", fake_calibrate, **kw)
+    assert len(calls) == 2                                   # new numerics -> recompute
+
+
+def test_finite_diff_rel_step_none_keeps_scipy_default(monkeypatch):
+    # None is SciPy's documented "automatic" value. It used to become an
+    # all-NaN eps, and SciPy's bound adjustment then probed every parameter
+    # at its far bound.
+    from src.calibration import _relative_fd_steps
+    opt = _relative_fd_steps({"finite_diff_rel_step": None}, [0.12, 1.4, -0.6, 0.04])
+    assert "finite_diff_rel_step" not in opt and "eps" not in opt
+    x0, probes = _fd_probes("rough_heston", monkeypatch, {"maxiter": 1, "finite_diff_rel_step": None})
+    assert len(probes) == len(x0)
+    for p in probes:
+        moved = np.flatnonzero(p != x0)
+        assert moved.size == 1
+        assert 0.0 < abs(p[moved[0]] - x0[moved[0]]) <= 1e-7

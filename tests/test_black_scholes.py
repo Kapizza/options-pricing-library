@@ -105,3 +105,51 @@ def test_implied_vol_roundtrip_with_q(option_type):
     iv = implied_vol_from_price(S, K, T, r, price, option_type=option_type, q=q)
     assert np.isfinite(iv)
     assert np.isclose(iv, sigma_true, rtol=2e-4, atol=2e-6)
+
+
+# -----------------------------
+# 6) Regression: IV solver uses forward no-arbitrage bounds
+# -----------------------------
+from src.volatility import implied_volatility
+
+
+def test_implied_vol_deep_itm_european_put_below_intrinsic():
+    # A deep ITM European put with r > 0 is worth less than K - S; that is
+    # a valid price (lower bound K e^{-rT} - S), not an arbitrage.
+    S, K, T, r, sigma = 60.0, 100.0, 2.0, 0.05, 0.20
+    p = black_scholes_price(S, K, T, r, sigma, "put")
+    assert p < K - S
+    assert np.isclose(implied_vol_from_price(S, K, T, r, p, "put"), sigma, rtol=1e-6)
+    assert np.isclose(implied_volatility(p, S, K, T, r, "put"), sigma, rtol=1e-6)
+
+
+def test_implied_vol_deep_itm_call_with_dividends():
+    S, K, T, r, q, sigma = 150.0, 100.0, 2.0, 0.01, 0.06, 0.20
+    c = black_scholes_price(S, K, T, r, sigma, "call", q=q)
+    assert c < S - K
+    assert np.isclose(implied_vol_from_price(S, K, T, r, c, "call", q=q), sigma, rtol=1e-6)
+
+
+@pytest.mark.parametrize("option_type", ["call", "put"])
+@pytest.mark.parametrize("q", [0.0, 0.03])
+def test_implied_vol_roundtrip_grid(option_type, q):
+    S, T, r = 100.0, 1.5, 0.04
+    for K in (50.0, 100.0, 200.0):
+        for sigma in (0.05, 0.2, 0.8, 3.0):
+            px = black_scholes_price(S, K, T, r, sigma, option_type, q=q)
+            fwd_intrinsic = S * np.exp(-q * T) - K * np.exp(-r * T)
+            if option_type == "put":
+                fwd_intrinsic = -fwd_intrinsic
+            if px - max(fwd_intrinsic, 0.0) < 1e-6:
+                continue  # no time value left: IV not identifiable in floating point
+            iv = implied_vol_from_price(S, K, T, r, px, option_type, q=q)
+            assert np.isclose(iv, sigma, rtol=1e-6, atol=1e-8), (K, sigma, iv)
+
+
+def test_implied_vol_unattainable_prices_return_nan():
+    S, K, T, r = 100.0, 100.0, 1.0, 0.05
+    lower_call = S - K * np.exp(-r * T)          # 4.877
+    assert np.isnan(implied_vol_from_price(S, K, T, r, 0.5 * lower_call, "call"))
+    assert np.isnan(implied_vol_from_price(S, K, T, r, 150.0, "call"))
+    assert np.isnan(implied_vol_from_price(S, K, T, r, K, "put"))   # above K e^{-rT}
+    assert np.isnan(implied_volatility(0.5 * lower_call, S, K, T, r, "call"))

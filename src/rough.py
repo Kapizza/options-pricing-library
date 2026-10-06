@@ -3,16 +3,19 @@
 Rough volatility tools (baseline)
 
 This module provides a minimal reference implementation for rBergomi-style rough
-vol pricing using a fractional Brownian motion (fBM) driver. It is intended as a
-slow but correct baseline for research notebooks. For production use, replace
-the fBM generator with a fast hybrid scheme and vectorize across strikes.
+vol pricing. It is intended as a slow but correct baseline for research notebooks.
 
-Model (rBergomi, H in (0,1)):
+Model (rBergomi, Bayer, Friz & Gatheral 2016; H in (0,1)):
     dS_t / S_t = sqrt(v_t) dW_t^S
-    v_t = xi0(t) * exp( eta * W_t^H - 0.5 * eta^2 * t^{2H} )
-    Corr(W^S, W) = rho
+    v_t = xi0(t) * exp( eta * W~_t - 0.5 * eta^2 * t^{2H} )
+    W~_t = sqrt(2H) * int_0^t (t - s)^{H - 1/2} dW_s   (Riemann-Liouville, Var = t^{2H})
+    W^S = rho * W + sqrt(1 - rho^2) * W_perp
 
-Where W^H is a fractional Brownian motion with Hurst exponent H.
+W~ is simulated with the hybrid scheme of Bennedsen, Lunde & Pakkanen (2017)
+(kappa = 1), driven by the same Brownian increments dW that enter the spot, so
+the spot-vol correlation rho is represented. The legacy fBM generators
+(Davies-Harte, Hosking) produce an fBM independent of the spot Brownian motion
+and are only accepted with rho = 0.
 xi0(t) is the forward variance curve. We support xi0 as a scalar or callable.
 
 Key functions:
@@ -62,8 +65,11 @@ def _xi0_as_callable(xi0) -> Callable[[np.ndarray], np.ndarray]:
         # broadcast if lengths match
         if x.size == tgrid.size:
             return x.astype(float)
-        # fallback to last value if shorter
-        return np.resize(x.astype(float), tgrid.size)
+        # pad with the last value if shorter, truncate if longer
+        x = x.astype(float).ravel()
+        if x.size < tgrid.size:
+            return np.concatenate([x, np.full(tgrid.size - x.size, x[-1])])
+        return x[:tgrid.size]
     return _f
 
 
@@ -90,11 +96,9 @@ def _child_seeds(base_seed, n_children):
     return [int(k.generate_state(1)[0]) for k in kids]
 
 
-# Try to avoid thread oversubscription when we parallelize at Python level.
-# Respect existing env if the user already configured them.
-for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-    if _var not in os.environ:
-        os.environ[_var] = "1"
+# Thread oversubscription: set OMP_NUM_THREADS / MKL_NUM_THREADS /
+# OPENBLAS_NUM_THREADS=1 in the shell before starting Python when using the
+# process-parallel helpers (the library does not change the environment).
 
 # Optional Numba acceleration
 try:  # pragma: no cover - optional dependency
@@ -117,14 +121,16 @@ def fbm_davies_harte(N, H, n_paths, rng):
     if not (0.0 < H < 1.0):
         raise ValueError("H must be in (0,1)")
 
-    m = np.arange(0, N, dtype=float)
+    # fGn autocovariance at lags 0..N; circulant embedding of size 2N
+    # (first row: r_0..r_{N-1}, r_N, r_{N-1}..r_1), as in Dieker (2004).
+    m = np.arange(0, N + 1, dtype=float)
     r = 0.5 * (np.power(m + 1.0, 2.0 * H) - 2.0 * np.power(m, 2.0 * H) + np.power(np.abs(m - 1.0), 2.0 * H))
     r[0] = 1.0
 
     c = np.empty(2 * N, dtype=float)
-    c[:N] = r
-    c[N] = 0.0
-    c[N+1:] = r[1:][::-1]
+    c[:N] = r[:N]
+    c[N] = r[N]
+    c[N+1:] = r[1:N][::-1]
 
     lam = np.fft.fft(c).real
     lam = np.maximum(lam, 0.0)
@@ -136,7 +142,7 @@ def fbm_davies_harte(N, H, n_paths, rng):
     for k in range(1, N):
         a = rng.normal(0.0, 1.0, size=n_paths)
         b = rng.normal(0.0, 1.0, size=n_paths)
-        Z[:, k] = a + 1j * b
+        Z[:, k] = (a + 1j * b) / np.sqrt(2.0)   # E|Z_k|^2 = 1, like the real modes k=0, N
         Z[:, 2 * N - k] = np.conj(Z[:, k])
 
     Y = Z * sqrtlam[None, :]
@@ -229,67 +235,62 @@ def fbm_increments_hosking(
 
 
 
-# ------------------------ fast fGn via Davies–Harte (FFT) ------------------------
-if 0:
+# ------------------------ Riemann-Liouville Volterra process (hybrid scheme) ------------------------
 
-    from functools import lru_cache
+def volterra_hybrid(N, H, dt, n_paths, rng):
+    """
+    Riemann-Liouville process W~_t = sqrt(2H) int_0^t (t-s)^{H-1/2} dW_s on the
+    grid t_i = i*dt, via the hybrid scheme of Bennedsen, Lunde & Pakkanen (2017)
+    with kappa = 1: the most recent step is integrated exactly, older steps use
+    the kernel evaluated at the optimal points b_k.
 
-    @lru_cache(maxsize=None)
-    def _dh_rfft_eigs(N, H):
-        # first row of the 2N circulant covariance for fGn
-        def gamma(k):
-            k = abs(int(k))
-            if k == 0:
-                return 1.0
-            return 0.5 * ((k + 1)**(2*H) - 2*(k**(2*H)) + (k - 1)**(2*H))
+    Returns
+    -------
+    Y : (n_paths, N+1) array, W~ on the grid (Y[:, 0] = 0)
+    dW : (n_paths, N) array, Brownian increments driving Y (variance dt)
+    var_Y : (N+1,) array, exact variance of the discretised Y (close to t^{2H})
+    """
+    N = int(N); n_paths = int(n_paths)
+    a = float(H) - 0.5
+    # joint law of (dW_i, int_{t_i}^{t_{i+1}} (t_{i+1}-s)^a dW_s): covariance
+    # [[dt, dt^(a+1)/(a+1)], [., dt^(2a+1)/(2a+1)]], whose closed-form Cholesky
+    # factor stays valid at H = 1/2 (a = 0), where the matrix is singular
+    s = dt ** (a + 0.5)
+    L = np.array([[math.sqrt(dt), 0.0],
+                  [s / (a + 1.0), s * abs(a) / ((a + 1.0) * math.sqrt(2.0 * a + 1.0))]])
+    Z = rng.standard_normal((n_paths, N, 2)) @ L.T
+    dW, dW_near = Z[:, :, 0], Z[:, :, 1]
 
-        N = int(N)
-        if N < 1:
-            raise ValueError("N must be >= 1")
-        if not (0.0 < H < 1.0):
-            raise ValueError("H must be in (0, 1)")
+    # kernel weights G[k] = (b_k dt)^a for k >= 2
+    G = np.zeros(N + 1)
+    if N >= 2:
+        k = np.arange(2, N + 1, dtype=float)
+        if abs(a) < 1e-12:
+            G[2:] = 1.0
+        else:
+            b = ((k ** (a + 1.0) - (k - 1.0) ** (a + 1.0)) / (a + 1.0)) ** (1.0 / a)
+            G[2:] = (b * dt) ** a
 
-        g = np.array([gamma(k) for k in range(N)], dtype=float)
-        c = np.empty(2*N, dtype=float)
-        c[:N] = g
-        c[N] = 0.0
-        c[N+1:] = g[1:][::-1]
+    # Y[:, i] = dW_near[:, i-1] + sum_{k=2}^{i} G[k] dW[:, i-k]
+    M = np.zeros((N, N + 1))
+    for j in range(N):
+        M[j, j + 2:] = G[2:N + 1 - j]
+    Y = np.zeros((n_paths, N + 1))
+    Y[:, 1:] = dW_near
+    Y += dW @ M
+    Y *= math.sqrt(2.0 * H)
 
-        lam = np.fft.rfft(c).real   # length N+1, nonnegative up to rounding
-        lam = np.maximum(lam, 0.0)
-        return lam  # rfft eigenvalues
-
-
-    def fgn_davies_harte(N, H, n_paths, rng):
-        N = int(N)
-        M = 2 * N
-        lam = _dh_rfft_eigs(N, H)            # length N+1 rfft eigenvalues
-
-        U = rng.standard_normal((n_paths, N+1))
-        V = rng.standard_normal((n_paths, N+1))
-
-        Y = np.empty((n_paths, N+1), dtype=np.complex128)
-        Y[:, 0] = np.sqrt(lam[0]) * U[:, 0]
-        Y[:, N] = np.sqrt(lam[N]) * U[:, N] if N > 0 else 0.0
-
-        if N > 1:
-            scale = np.sqrt(lam[1:N] / 2.0)[None, :]
-            Y[:, 1:N] = (U[:, 1:N] + 1j * V[:, 1:N]) * scale
-
-        # NumPy irfft has a 1/M factor; compensate by sqrt(M)
-        x_full = np.fft.irfft(Y, n=M, axis=1).real * np.sqrt(M)
-        x = x_full[:, :N]
-        s = float(np.std(x[:, 0], ddof=1))
-        if s > 0:
-            x /= s
-        return x
+    var_Y = np.zeros(N + 1)
+    var_Y[1:] = 2.0 * H * (dt ** (2.0 * a + 1.0) / (2.0 * a + 1.0)
+                           + np.concatenate([[0.0], np.cumsum(G[2:] ** 2)]) * dt)
+    return Y, dW, var_Y
 
 
 # ------------------------ rBergomi paths ------------------------
 
 def rbergomi_paths(
     S0, T, N, n_paths, H, eta, rho, xi0,
-    r=0.0, q=0.0, seed=None, fgn_method="davies-harte"
+    r=0.0, q=0.0, seed=None, fgn_method="hybrid"
 ):
     """
     Simulate rBergomi paths for S and v on a uniform grid using simple Euler.
@@ -319,6 +320,11 @@ def rbergomi_paths(
         Dividend yield (cont. comp.).
     seed : int or None
         RNG seed.
+    fgn_method : str
+        "hybrid" (default): Riemann-Liouville Volterra process via the hybrid
+        scheme, driven by the Brownian motion that is correlated into the spot.
+        "davies-harte" / "hosking": legacy fBM generators. They produce an fBM
+        independent of the spot Brownian motion, so they require rho = 0.
 
     Returns
     -------
@@ -331,9 +337,11 @@ def rbergomi_paths(
 
     Notes
     -----
-    - Uses Euler step for S with drift (r - q), diffusion sqrt(v).
-    - rBergomi variance is lognormal by design, v_t = xi0(t) * exp(eta*W_H(t) - 0.5*eta^2 t^{2H}).
-    - Correlation is enforced by building correlated Brownian increments for S and fBM's innovation driver.
+    - Uses log-Euler step for S with drift (r - q), diffusion sqrt(v) at the left point.
+    - rBergomi variance is lognormal by design, v_t = xi0(t) * exp(eta*W~_t - 0.5*eta^2 Var(W~_t)).
+      With the hybrid scheme the compensator uses the exact variance of the discretised
+      W~ (within 0.1% of t^{2H} for H <= 0.7, up to 0.7% as H -> 1), so E[v_t] = xi0(t)
+      on the grid.
     """
     S0 = _floor_pos(S0); T = _floor_pos(T)
     N = int(N); n_paths = int(n_paths)
@@ -341,6 +349,13 @@ def rbergomi_paths(
     if not (-0.999 < rho < 0.999): raise ValueError("rho must be in (-0.999, 0.999)")
     if not (0.0 < H < 1.0): raise ValueError("H must be in (0,1)")
     eta = _floor_pos(eta); r = float(r); q = float(q)
+    method = str(fgn_method).lower()
+    use_hybrid = method.startswith("hyb")
+    if not use_hybrid and rho != 0.0:
+        raise ValueError(
+            f"fgn_method={fgn_method!r} simulates an fBM independent of the spot Brownian "
+            "motion, so rho != 0 cannot be represented; use fgn_method='hybrid'"
+        )
 
     rng = np.random.default_rng(seed)
     t = np.linspace(0.0, T, N + 1)
@@ -350,8 +365,22 @@ def rbergomi_paths(
     xi_fn = _xi0_as_callable(xi0)
     xi_vec = xi_fn(t)
 
-    # Build W^H(t)
-    if fgn_method.lower().startswith("dav"):
+    if use_hybrid:
+        Y, dW, var_Y = volterra_hybrid(N, H, dt, n_paths, rng)
+        Z_perp = rng.standard_normal((n_paths, N))
+        dW_S = rho * dW / sqrt_dt + math.sqrt(1.0 - rho * rho) * Z_perp
+        v = (xi_vec[None, :] * np.exp(eta * Y - 0.5 * (eta ** 2) * var_Y[None, :])).astype(float)
+        v = np.maximum(v, 1e-14)
+        S = np.empty((n_paths, N + 1), dtype=float)
+        S[:, 0] = S0
+        drift = (r - q) * dt
+        for k in range(N):
+            vol_step = np.sqrt(np.maximum(v[:, k], 1e-14)) * sqrt_dt
+            S[:, k + 1] = S[:, k] * np.exp(drift - 0.5 * vol_step**2 + vol_step * dW_S[:, k])
+        return t, S, v
+
+    # Legacy fBM drivers (rho == 0): build W^H(t)
+    if method.startswith("dav"):
         BH = fbm_davies_harte(N, H, n_paths, rng)      # unit-step fBm
         W_H = BH * (dt**H)
     else:
@@ -359,12 +388,6 @@ def rbergomi_paths(
         for i in range(n_paths):
             fgn = fbm_increments_hosking(N, H, rng)
             W_H[i, 1:] = np.cumsum(fgn) * (dt**H)
-
-    # One global normalization (self-similarity fixes all t)
-    var_emp  = float(np.var(W_H[:, -1], ddof=1))
-    var_theo = float(t[-1]**(2.0 * H))
-    if var_emp > 0.0 and var_emp != var_theo:
-        W_H *= math.sqrt(var_theo / var_emp)
 
     # Correlated Brownian for S
     Z1 = rng.standard_normal((n_paths, N))
@@ -408,7 +431,7 @@ def _rbergomi_terminal_worker(args):
 
 def rbergomi_paths_parallel(
     S0, T, N, n_paths, H, eta, rho, xi0,
-    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    r=0.0, q=0.0, base_seed=12345, fgn_method="hybrid",
     n_workers=4, batch_size=8192, return_variance=True
 ):
     """
@@ -439,7 +462,7 @@ def rbergomi_paths_parallel(
 def rbergomi_paths_parallel_pool(
     executor,
     S0, T, N, n_paths, H, eta, rho, xi0,
-    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    r=0.0, q=0.0, base_seed=12345, fgn_method="hybrid",
     batch_size=8192, return_variance=True
 ):
     """Same as rbergomi_paths_parallel but reuses a provided executor."""
@@ -457,7 +480,7 @@ def rbergomi_paths_parallel_pool(
 def rbergomi_terminal_parallel_pool(
     executor,
     S0, T, N, n_paths, H, eta, rho, xi0,
-    r=0.0, q=0.0, base_seed=12345, fgn_method="davies-harte",
+    r=0.0, q=0.0, base_seed=12345, fgn_method="hybrid",
     batch_size=8192
 ):
     """Parallel rBergomi returning only terminal ST to minimize IPC."""
@@ -517,9 +540,7 @@ def rbergomi_euro_mc(
     Notes
     -----
     - Uses log-Euler for S with instantaneous variance from rBergomi.
-    - Uses slow Hosking fBM. Expect O(n_paths*N^2) because fBM is per path O(N^2).
-      Good for validation and small grids.
-    - For speed, replace fbm_increments_hosking with a hybrid scheme.
+    - The Volterra driver uses the hybrid scheme (see rbergomi_paths).
     """
     option = _validate_call_put(option)
     S0 = _floor_pos(S0)
@@ -562,7 +583,8 @@ def _kernel_weights(H, N, dt):
     m = np.arange(0, N+1, dtype=float)
     alpha = np.zeros(N+1, dtype=float)
     if N>=1: alpha[1:] = m[1:]**(H+0.5) - m[:-1]**(H+0.5)
-    cH = 1.0/_gamma(H+0.5)
+    # (1/Gamma(H+1/2)) * int (t-s)^{H-1/2} ds over a step = dt^{H+1/2} * alpha[m] / Gamma(H+3/2)
+    cH = 1.0/_gamma(H+1.5)
     drift_scale = cH * (dt**(H+0.5))
     diff_scale  = cH * (dt**H)
     return cH, alpha, drift_scale, diff_scale

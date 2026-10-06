@@ -133,3 +133,14 @@ def test_butterfly_spread_non_negative():
 
     price = butterfly_spread(S, K1, K2, K3, r, T, sigma)
     assert price >= 0
+
+def test_butterfly_spread_keyword_call_matches_definition():
+    # butterfly_spread takes (..., r, T, sigma); notebook 07 passed (T, r, sigma)
+    # positionally and plotted a curve 2.4x too high (4.43 vs 1.84 at S=100).
+    S, K1, K2, K3, T, r, sigma = 100.0, 90.0, 100.0, 110.0, 1.0, 0.05, 0.2
+    expected = (black_scholes_price(S, K1, T, r, sigma, "call")
+                - 2 * black_scholes_price(S, K2, T, r, sigma, "call")
+                + black_scholes_price(S, K3, T, r, sigma, "call"))
+    assert abs(butterfly_spread(S, K1, K2, K3, T=T, r=r, sigma=sigma) - expected) < 1e-12
+    vec = np.vectorize(butterfly_spread)(np.array([S]), K1, K2, K3, T=T, r=r, sigma=sigma)
+    assert abs(vec[0] - expected) < 1e-12

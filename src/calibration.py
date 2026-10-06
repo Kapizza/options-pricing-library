@@ -32,6 +32,13 @@ from src.rough import (
 from src.heston import heston_smile_prices
 
 _VEGA_WEIGHT_SCHEME = "v3_floor0.25_cap4_normmean_wing0.35_p1"
+# Part of the calibration cache key: bump whenever model numerics change so that
+# results computed with older code are never served from the cache.
+# 2: Heston COS truncation, rBergomi hybrid scheme, rough Heston kernel,
+#    dividend-consistent IVs, relative finite-difference steps.
+# 3: Heston COS put coefficients + parity, fat-tail window and cancellation-free
+#    CF; rBergomi back to SciPy's default finite-difference step.
+_MODEL_VERSION = 3
 _VEGA_WEIGHT_FLOOR = 0.25
 _VEGA_WEIGHT_CAP = 4.0
 
@@ -167,6 +174,7 @@ def calibrate_cached(
         metric=metric,
         vega_weight=vega_weight,
         vega_weight_scheme=_VEGA_WEIGHT_SCHEME,
+        model_version=_MODEL_VERSION,
         x0=x0,
         mc=mc,
         seed=seed,
@@ -177,7 +185,8 @@ def calibrate_cached(
     key = _hash_config({"model": model, **cfg})
     fpath = _cache_file(cache_dir, model, key)
     if os.path.exists(fpath):
-        blob = json.load(open(fpath, "r", encoding="utf-8"))
+        with open(fpath, "r", encoding="utf-8") as fh:
+            blob = json.load(fh)
         best_blob = blob.get("best")
         cache_ok = True
         if isinstance(best_blob, dict):
@@ -205,9 +214,25 @@ def calibrate_cached(
     dt = time.time() - t0
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
     blob = {"best": best, "raw": {}, "elapsed_sec": dt, "cfg": _to_ser(cfg), "cache_file": fpath}
-    json.dump(_to_ser(blob), open(fpath, "w", encoding="utf-8"), indent=2)
+    with open(fpath, "w", encoding="utf-8") as fh:
+        json.dump(_to_ser(blob), fh, indent=2)
     print(f"[cache saved] {model} ({dt:.2f}s) -> {os.path.relpath(fpath)}")
     return best, blob
+
+
+def _relative_fd_steps(opt, x):
+    """
+    SciPy's L-BFGS-B always passes its `eps` option (default 1e-8) to the
+    finite-difference routine as an absolute step, and an absolute step overrides
+    `finite_diff_rel_step`. Convert a requested relative step into per-parameter
+    absolute steps so that it actually takes effect.
+    """
+    if "eps" not in opt and "finite_diff_rel_step" in opt:
+        rel = opt.pop("finite_diff_rel_step")
+        if rel is not None:  # None is SciPy's "choose automatically": keep eps
+            rel = np.asarray(rel, dtype=float)
+            opt["eps"] = rel * np.maximum(np.abs(np.asarray(x, dtype=float)), 1e-3)
+    return opt
 
 
 class _CalibMonitor:
@@ -276,18 +301,19 @@ class _CalibMonitor:
 
 
 def _iv_or_nan(S, K, T, r, q, price, cp):
-    # Map to no-dividend equivalent for the solver which assumes q=0
+    # Map to the no-dividend equivalent for the solver, which assumes q=0:
+    # BS(S, K, T, r, q) == BS(S e^{-qT}, K, T, r, 0). The rate stays r.
     S_eff = S * math.exp(-q * T)
-    r_eff = r - q
+    DF = math.exp(-r * T)
 
-    intrinsic = max(0.0, S_eff - K) if cp == "call" else max(0.0, K - S_eff)
-    upper = (S_eff if cp == "call" else K * math.exp(-r_eff * T))
+    lower = max(0.0, S_eff - K * DF) if cp == "call" else max(0.0, K * DF - S_eff)
+    upper = (S_eff if cp == "call" else K * DF)
 
     eps = 1e-10
-    if not (intrinsic + eps < price < upper - eps):
+    if not (lower + eps < price < upper - eps):
         return np.nan
     try:
-        return _iv_solve(price, S_eff, K, T, r_eff, option_type=cp)
+        return _iv_solve(price, S_eff, K, T, r, option_type=cp)
     except Exception:
         return np.nan
 
@@ -337,7 +363,7 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
             t, S_paths, _V = rbergomi_paths_parallel(
                 S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
                 r=r, q=q, base_seed=base_seed, n_workers=mc.get("n_workers", 4),
-                fgn_method=mc.get("fgn_method", "davies-harte")
+                fgn_method=mc.get("fgn_method", "hybrid")
             )
             ST = S_paths[:, -1]
         else:
@@ -345,14 +371,14 @@ def _rbergomi_objective(params, data, metric, weights, mc, seed, exec_ctx=None, 
                 ST = rbergomi_terminal_parallel_pool(
                     exec_ctx,
                     S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
-                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
+                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "hybrid"),
                     batch_size=mc.get("batch_size", 8192)
                 )
             else:
                 _t, S_paths, _V = rbergomi_paths_parallel_pool(
                     exec_ctx,
                     S0=S0, T=T, N=N_eff, n_paths=mc["paths"], H=H, eta=eta, rho=rho, xi0=xi0,
-                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "davies-harte"),
+                    r=r, q=q, base_seed=base_seed, fgn_method=mc.get("fgn_method", "hybrid"),
                     batch_size=mc.get("batch_size", 8192), return_variance=False
                 )
                 ST = S_paths[:, -1]
@@ -403,7 +429,7 @@ def calibrate_rbergomi(
     vega_weight: bool = True,
     bounds=((0.02, 0.45), (0.2, 3.0), (-0.999, -0.01), (1e-4, 1.0)),  # H, eta, rho, xi0
     x0=(0.10, 1.5, -0.7, 0.04),
-    mc=dict(N=192, paths=12000, fgn_method="davies-harte", batch_size=8192, n_workers=4),
+    mc=dict(N=192, paths=12000, fgn_method="hybrid", batch_size=8192, n_workers=4),
     seed: int = 1234,
     n_workers: int = 4,
     parallel_backend: str = "process",  # or "thread"
@@ -475,12 +501,14 @@ def calibrate_rbergomi(
             obj = lambda x: _rbergomi_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            # Make finite-diff steps large enough relative to parameter scales by default
-            _opt = {"maxiter": 200, "disp": False}
+            # Keep SciPy's small absolute finite-difference step (eps=1e-8). The
+            # objective uses common random numbers (fixed seed per maturity) and
+            # an unfloored lognormal variance, so it is a smooth deterministic
+            # function of (H, eta, rho, xi0) and small forward differences give
+            # accurate gradients; 5% relative steps stall the line search.
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
-            if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
-                _opt["finite_diff_rel_step"] = 5e-2
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),
@@ -678,11 +706,12 @@ def calibrate_rough_heston(
             obj = lambda x: _rough_heston_objective(x, dat, metric, weights, mc, seed, ex, terminal_only)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            _opt = {"maxiter": 200, "disp": False}
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
                 _opt["finite_diff_rel_step"] = 5e-2
+            _opt = _relative_fd_steps(_opt, guess)
             res = minimize(
                 obj_wrapped,
                 x0=np.array(guess),
@@ -851,7 +880,7 @@ def calibrate_heston(
             obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=None)
             obj_wrapped = mon.wrap_obj(obj)
             mon.start(start_idx=i)
-            _opt = {"maxiter": 200, "disp": False}
+            _opt = {"maxiter": 200}
             if options:
                 _opt.update(options)
             if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):
@@ -872,7 +901,7 @@ def calibrate_heston(
                 obj = lambda x: _heston_objective(x, dat, metric, weights, mc, exec_ctx=ex)
                 obj_wrapped = mon.wrap_obj(obj)
                 mon.start(start_idx=i)
-                _opt = {"maxiter": 200, "disp": False}
+                _opt = {"maxiter": 200}
                 if options:
                     _opt.update(options)
                 if ("eps" not in _opt) and ("finite_diff_rel_step" not in _opt):

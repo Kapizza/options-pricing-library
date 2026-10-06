@@ -105,3 +105,27 @@ def test_vectorized_inputs():
     assert "vanna" in hv and "volga" in hv
     assert np.all(np.isfinite(hv["vanna"]))
     assert np.all(np.isfinite(hv["volga"]))
+
+
+# -----------------------------------------
+# Regression: negative dividend yield (borrow cost / negative foreign rate)
+# -----------------------------------------
+import pytest
+
+
+@pytest.mark.parametrize("option_type, S, K, T", [("call", 100.0, 100.0, 1.0), ("put", 90.0, 110.0, 0.3), ("put", 120.0, 100.0, 2.0)])
+def test_greeks_negative_q_match_finite_differences(option_type, S, K, T):
+    r, sigma, q = 0.05, 0.25, -0.02
+    f = lambda S_=S, s_=sigma: black_scholes_price(S_, K, T, r, s_, option_type, q=q)
+    hS, hs = 1e-3 * S, 1e-3
+    d_fd = (f(S + hS) - f(S - hS)) / (2 * hS)
+    g_fd = (f(S + hS) - 2 * f() + f(S - hS)) / hS ** 2
+    v_fd = (f(s_=sigma + hs) - f(s_=sigma - hs)) / (2 * hs)
+    vanna_fd = (f(S + hS, sigma + hs) - f(S + hS, sigma - hs) - f(S - hS, sigma + hs) + f(S - hS, sigma - hs)) / (4 * hS * hs)
+    volga_fd = (f(s_=sigma + hs) - 2 * f() + f(s_=sigma - hs)) / hs ** 2
+    hv = vanna_volga(S, K, T, r, sigma, q=q)
+    assert np.isclose(delta(S, K, T, r, sigma, option_type, q=q), d_fd, rtol=1e-5)
+    assert np.isclose(gamma(S, K, T, r, sigma, q=q), g_fd, rtol=1e-4)
+    assert np.isclose(vega(S, K, T, r, sigma, q=q), v_fd, rtol=1e-5)
+    assert np.isclose(hv["vanna"], vanna_fd, rtol=1e-4)
+    assert np.isclose(hv["volga"], volga_fd, rtol=1e-4)

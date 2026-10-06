@@ -29,11 +29,11 @@ def monte_carlo_option_price(S0, K, T, r, sigma, option_type="call", n_simulatio
     float
         Estimated option price
     """
-    if seed is not None:
-        np.random.seed(seed)
+    # Local generator: seeding must not reset NumPy's global random state
+    rng = np.random.default_rng(seed)
 
     # Simulate terminal stock prices under risk-neutral measure
-    Z = np.random.standard_normal(n_simulations)
+    Z = rng.standard_normal(n_simulations)
     ST = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
 
     # Payoff

@@ -29,6 +29,16 @@ def binomial_tree(S, K, T, r, sigma, steps=100, option_type="call", american=Fal
         Option price
     """
 
+    # at (or past) expiry the option is worth its intrinsic value
+    if T <= 0:
+        if option_type == "call":
+            return max(S - K, 0.0)
+        elif option_type == "put":
+            return max(K - S, 0.0)
+        raise ValueError("option_type must be 'call' or 'put'")
+    if sigma <= 0:
+        raise ValueError("sigma must be positive for a CRR tree")
+
     # time per step
     dt = T / steps
     # up and down factors
@@ -36,6 +46,9 @@ def binomial_tree(S, K, T, r, sigma, steps=100, option_type="call", american=Fal
     d = 1 / u
     # risk-neutral probability
     p = (np.exp(r * dt) - d) / (u - d)
+    if not (0.0 <= p <= 1.0):
+        raise ValueError(f"risk-neutral probability p={p:.4f} outside [0, 1]; "
+                         "increase steps (need sigma*sqrt(dt) > |r|*dt)")
 
     # stock prices at maturity
     ST = np.array([S * (u ** j) * (d ** (steps - j)) for j in range(steps + 1)])

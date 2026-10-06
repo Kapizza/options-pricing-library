@@ -29,7 +29,7 @@ def test_rbergomi_calibration_quick_performance():
     t, S_paths, V_paths = rbergomi_paths(
         S0=S0, T=T, N=48, n_paths=2000,
         H=H_true, eta=eta_true, rho=rho_true, xi0=xi0_true,
-        r=r, q=q, seed=202401, fgn_method="davies-harte"
+        r=r, q=q, seed=202401, fgn_method="hybrid"
     )
     ST = S_paths[:, -1]
     mids = _prices_from_ST(ST, r, T, strikes, cp=cp)
@@ -43,7 +43,7 @@ def test_rbergomi_calibration_quick_performance():
         vega_weight=True,
         x0=(0.11, 1.35, -0.55, 0.038),
         bounds=((0.05, 0.30), (0.4, 3.0), (-0.95, -0.05), (0.02, 0.08)),
-        mc=dict(N=48, paths=2000, fgn_method="davies-harte", batch_size=4096, n_workers=4),
+        mc=dict(N=48, paths=2000, fgn_method="hybrid", batch_size=4096, n_workers=4),
         multistart=1,
         options={"maxiter": 3},
         seed=202401,

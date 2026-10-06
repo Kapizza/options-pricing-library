@@ -33,45 +33,25 @@ def sabr_iv(F, K, T, alpha, beta, rho, nu, eps=1e-12):
         return np.nan
 
     one_m_beta = 1.0 - beta
-    FK_beta = (F * K)**(0.5 * one_m_beta) if one_m_beta != 0 else 1.0
-    logFK = np.log(F / K) if K > 0 else 0.0
+    logFK = np.log(F / K)
+    FK_half = (F * K) ** (0.5 * one_m_beta)          # (FK)^{(1-beta)/2}
 
-    if abs(F - K) < eps:
-        z = 0.0
+    # z / x(z), with its series expansion near z = 0
+    z = (nu / alpha) * FK_half * logFK
+    if abs(z) < 1e-6:
+        z_over_x = 1.0 - 0.5 * rho * z + (2.0 - 3.0 * rho * rho) * z * z / 12.0
     else:
-        z = (nu / alpha) * FK_beta * logFK
+        x = np.log((np.sqrt(1.0 - 2.0 * rho * z + z * z) + z - rho) / (1.0 - rho))
+        z_over_x = z / x
 
-    sqrt_term = np.sqrt(1.0 - 2.0 * rho * z + z * z)
-    num = sqrt_term + z - rho
-    den = 1.0 - rho
-    if num <= 0 or den <= 0:
-        x = np.log(max(num, eps) / max(den, eps))
-    else:
-        x = np.log(num / den)
-
-    z_over_x = 1.0 if abs(z) < eps else z / x
-
-    # Hagan prefactor and correction
-    if one_m_beta != 0:
-        F_pow = F**(one_m_beta)
-        K_pow = K**(one_m_beta)
-        denom = np.sqrt(F_pow * K_pow)
-        A0 = alpha / max(denom, eps)
-        term1 = (one_m_beta**2 / 24.0) * (alpha * alpha) / max(F_pow * K_pow, eps)
-        term2 = (rho * beta * nu * alpha) / (4.0 * max(denom, eps))
-    else:
-        # beta == 1 limit
-        A0 = alpha
-        term1 = 0.0
-        term2 = 0.0
-    term3 = ((2.0 - 3.0 * rho * rho) * nu * nu) / 24.0
-
-    A = A0 * (1.0 + (term1 + term2 + term3) * T)
-
-    if abs(F - K) < eps:
-        return float(A)          # ATM limit
-    else:
-        return float(A * z_over_x)
+    # Hagan et al. (2002), eq. (2.17a)
+    denom = FK_half * (1.0
+                       + one_m_beta ** 2 / 24.0 * logFK ** 2
+                       + one_m_beta ** 4 / 1920.0 * logFK ** 4)
+    corr = 1.0 + (one_m_beta ** 2 / 24.0 * alpha * alpha / (FK_half * FK_half)
+                  + 0.25 * rho * beta * nu * alpha / FK_half
+                  + (2.0 - 3.0 * rho * rho) / 24.0 * nu * nu) * T
+    return float(alpha / denom * z_over_x * corr)
 
 # -----------------------------
 # SABR -> BS pricing
@@ -128,7 +108,7 @@ def sabr_calibrate_iv(K, T, iv_mkt, F, w=None, beta=None, x0=None, bounds=None, 
             d = iv_model - iv_mkt
             return float(np.mean(w * d * d))
 
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter, disp=disp))
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter))  # `disp` is ignored (removed from SciPy L-BFGS-B)
         return dict(alpha=res.x[0], beta=res.x[1], rho=res.x[2], nu=res.x[3]), res
     else:
         bfix = float(beta)
@@ -146,7 +126,7 @@ def sabr_calibrate_iv(K, T, iv_mkt, F, w=None, beta=None, x0=None, bounds=None, 
             d = iv_model - iv_mkt
             return float(np.mean(w * d * d))
 
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter, disp=disp))
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, options=dict(maxiter=maxiter))  # `disp` is ignored (removed from SciPy L-BFGS-B)
         return dict(alpha=res.x[0], beta=bfix, rho=res.x[1], nu=res.x[2]), res
 
 # -----------------------------

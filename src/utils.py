@@ -104,10 +104,15 @@ def remaining_T_in_years(start_date, expiry_date, current_date, basis=252):
     Remaining time to maturity in years using a simple day-count basis.
 
     Notes:
-      - Uses calendar days between dates divided by 'basis' (default 252).
-      - Keep it simple; if you prefer strict trading-day counts, plug one in.
+      - basis=252 (default): business days (Mon-Fri, no holiday calendar)
+        between the dates divided by 252.
+      - any other basis (e.g. 365): calendar days divided by 'basis'.
     """
-    days_rem = (pd.Timestamp(expiry_date) - pd.Timestamp(current_date)).days
+    cur, exp = pd.Timestamp(current_date), pd.Timestamp(expiry_date)
+    if float(basis) == 252.0:
+        days_rem = np.busday_count(cur.date(), exp.date()) if exp > cur else 0
+    else:
+        days_rem = (exp - cur).days
     return max(0.0, days_rem / float(basis))
 
 

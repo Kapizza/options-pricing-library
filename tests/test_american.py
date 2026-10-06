@@ -71,3 +71,12 @@ def test_invalid_option_raises():
     import pytest
     with pytest.raises(ValueError):
         american_lsmc(S, K, T, r, sigma, option="invalid", n_paths=10_000, n_steps=20, seed=0)
+
+
+def test_lsmc_deep_itm_put_is_at_least_intrinsic():
+    # An American put is worth at least K - S0 (exercise at t=0). LSMC used to
+    # skip the t=0 decision and returned 39.90 here (binomial 40.00).
+    S, K, T, r, sigma = 60.0, 100.0, 1.0, 0.05, 0.2
+    v = american_put_lsmc(S, K, T, r, sigma, n_paths=50_000, n_steps=50, seed=0)
+    assert v >= K - S - 1e-12
+    assert abs(v - american_binomial(S, K, T, r, sigma, steps=2000)) < 0.02

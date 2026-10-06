@@ -117,3 +117,99 @@ def test_in_out_parity_down_barrier_put_strict():
 
     # Tight tolerance with many paths
     assert approx(p_in + p_out, vanilla, rel=6e-3, abs_=2e-3)
+
+
+# ---------------------------------------------------------------------------
+# Regression: MC prices against closed-form continuous-barrier prices
+# (Reiner & Rubinstein 1991; formulas as in Haug 2007, sec. 4.17.1).
+# Knock-out rebates are paid at the hit time, knock-in rebates at expiry
+# if the barrier is never hit.
+# ---------------------------------------------------------------------------
+
+def _haug_barrier(S, X, H, T, r, q, s, barrier, option, rebate=0.0):
+    from scipy.stats import norm
+    N = norm.cdf
+    b = r - q
+    sT = s * math.sqrt(T)
+    mu = (b - 0.5 * s * s) / (s * s)
+    lam = math.sqrt(mu * mu + 2.0 * r / (s * s))
+    x1 = math.log(S / X) / sT + (1 + mu) * sT
+    x2 = math.log(S / H) / sT + (1 + mu) * sT
+    y1 = math.log(H * H / (S * X)) / sT + (1 + mu) * sT
+    y2 = math.log(H / S) / sT + (1 + mu) * sT
+    z = math.log(H / S) / sT + lam * sT
+    eta = 1.0 if barrier.startswith("down") else -1.0
+    phi = 1.0 if option == "call" else -1.0
+    fq, fr = math.exp((b - r) * T), math.exp(-r * T)
+    A = phi * S * fq * N(phi * x1) - phi * X * fr * N(phi * x1 - phi * sT)
+    B = phi * S * fq * N(phi * x2) - phi * X * fr * N(phi * x2 - phi * sT)
+    C = (phi * S * fq * (H / S) ** (2 * (mu + 1)) * N(eta * y1)
+         - phi * X * fr * (H / S) ** (2 * mu) * N(eta * y1 - eta * sT))
+    D = (phi * S * fq * (H / S) ** (2 * (mu + 1)) * N(eta * y2)
+         - phi * X * fr * (H / S) ** (2 * mu) * N(eta * y2 - eta * sT))
+    E = rebate * fr * (N(eta * x2 - eta * sT) - (H / S) ** (2 * mu) * N(eta * y2 - eta * sT))
+    F = rebate * ((H / S) ** (mu + lam) * N(eta * z)
+                  + (H / S) ** (mu - lam) * N(eta * z - 2 * eta * lam * sT))
+    above = X > H
+    table = {
+        ("down-and-in", "call"): C + E if above else A - B + D + E,
+        ("up-and-in", "call"): A + E if above else B - C + D + E,
+        ("down-and-in", "put"): B - C + D + E if above else A + E,
+        ("up-and-in", "put"): A - B + D + E if above else C + E,
+        ("down-and-out", "call"): A - C + F if above else B - D + F,
+        ("up-and-out", "call"): F if above else A - B + C - D + F,
+        ("down-and-out", "put"): A - B + C - D + F if above else F,
+        ("up-and-out", "put"): B - D + F if above else A - C + F,
+    }
+    return float(table[(barrier, option)])
+
+
+# Haug (2007), Table 4-13: S=100, T=0.5, r=0.08, b=0.04, sigma=0.25, rebate=3
+_HAUG_TABLE = [
+    ("down-and-out", "call", 95, (9.0246, 6.7924, 4.8759)),
+    ("up-and-out", "call", 105, (2.6789, 2.3580, 2.3453)),
+    ("down-and-in", "call", 95, (7.7627, 4.0109, 2.0576)),
+    ("up-and-in", "call", 105, (14.1112, 8.4482, 4.5910)),
+    ("down-and-out", "put", 95, (2.2798, 2.2947, 2.6252)),
+    ("up-and-out", "put", 105, (3.7760, 5.4932, 7.5187)),
+    ("down-and-in", "put", 95, (2.9586, 6.5677, 11.9752)),
+    ("up-and-in", "put", 105, (1.4653, 3.3721, 7.0846)),
+]
+
+
+@pytest.mark.parametrize("barrier, option, H, refs", _HAUG_TABLE)
+def test_closed_form_reference_matches_haug_table(barrier, option, H, refs):
+    for X, ref in zip((90.0, 100.0, 110.0), refs):
+        val = _haug_barrier(100.0, X, H, 0.5, 0.08, 0.04, 0.25, barrier, option, rebate=3.0)
+        assert abs(val - ref) < 6e-5
+
+
+_MC_CASES = [
+    ("up-and-out", "call", 100.0, 120.0),
+    ("down-and-out", "call", 100.0, 90.0),
+    ("down-and-out", "put", 100.0, 80.0),
+    ("up-and-out", "put", 100.0, 110.0),
+    ("up-and-in", "call", 100.0, 120.0),
+    ("down-and-in", "call", 100.0, 90.0),
+    ("down-and-in", "put", 100.0, 80.0),
+    ("up-and-in", "put", 100.0, 110.0),
+]
+
+
+@pytest.mark.parametrize("barrier, option, K, H", _MC_CASES)
+def test_mc_matches_closed_form_no_rebate(barrier, option, K, H):
+    S0, T, r, q, sigma = 100.0, 1.0, 0.03, 0.01, 0.2
+    cfg = MCConfig(n_paths=100_000, n_steps=100, seed=42, antithetic=True)
+    mc = barrier_price_mc(S0, K, H, T, r, q, sigma, option=option, barrier=barrier, cfg=cfg)
+    cf = _haug_barrier(S0, K, H, T, r, q, sigma, barrier, option)
+    assert abs(mc - cf) < max(0.03, 0.01 * cf), f"MC {mc:.4f} vs closed form {cf:.4f}"
+
+
+@pytest.mark.parametrize("barrier, option, K, H", _MC_CASES)
+def test_mc_matches_closed_form_with_rebate(barrier, option, K, H):
+    S0, T, r, q, sigma, rebate = 100.0, 1.0, 0.03, 0.01, 0.2, 3.0
+    cfg = MCConfig(n_paths=100_000, n_steps=100, seed=7, antithetic=True)
+    mc = barrier_price_mc(S0, K, H, T, r, q, sigma, option=option, barrier=barrier,
+                          rebate=rebate, cfg=cfg)
+    cf = _haug_barrier(S0, K, H, T, r, q, sigma, barrier, option, rebate=rebate)
+    assert abs(mc - cf) < max(0.03, 0.01 * cf), f"MC {mc:.4f} vs closed form {cf:.4f}"

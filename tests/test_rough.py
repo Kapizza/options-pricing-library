@@ -240,7 +240,10 @@ def base():
         n_paths=6000,   # keep moderate for speed; raise if needed
         H=0.10,
         eta=1.5,
-        rho=-0.7,
+        # The legacy fBM drivers below cannot carry spot-vol correlation and
+        # now require rho=0. These tests only inspect v, which those drivers
+        # generate independently of rho (identical v paths for rho=-0.7 and 0).
+        rho=0.0,
         r=0.02,
         q=0.00,
         xi0=0.04,       # flat forward variance
@@ -317,3 +320,161 @@ def test_speed_branch_selection_visible(base):
     t2, S2, v2 = _run(base, "hosking")
     assert S1.shape == S2.shape == (base["n_paths"], base["N"] + 1)
     assert v1.shape == v2.shape
+
+# --------------------------
+# Regression: Davies-Harte fBM has the exact fGn covariance
+# --------------------------
+from src.rough import fbm_davies_harte
+
+
+@pytest.mark.parametrize("H", [0.1, 0.3, 0.7])
+def test_davies_harte_covariance_is_exact(H):
+    N, n_paths = 64, 100_000
+    B = fbm_davies_harte(N, H, n_paths, np.random.default_rng(2024))
+    X = np.diff(B, axis=1)                        # unit-step fGn
+    gam = lambda k: 0.5 * (abs(k + 1) ** (2 * H) - 2 * abs(k) ** (2 * H) + abs(k - 1) ** (2 * H))
+    for lag in (0, 1, 2, 10):
+        emp = float(np.mean(X[:, 5] * X[:, 5 + lag]))
+        assert abs(emp - gam(lag)) < 0.02, f"lag {lag}: {emp} vs {gam(lag)}"
+    for n in (1, 8, 64):
+        emp = float(np.var(B[:, n]))
+        assert abs(emp / n ** (2 * H) - 1.0) < 0.02, f"Var B({n}) = {emp} vs {n ** (2 * H)}"
+
+
+# --------------------------
+# Regression: rBergomi spot-vol correlation (hybrid Riemann-Liouville driver)
+# --------------------------
+from scipy.integrate import quad
+from src.black_scholes import implied_vol_from_price
+
+
+def _smile(S, K_list, T):
+    ST = S[:, -1]
+    return [implied_vol_from_price(100.0, K, T, 0.0, float(np.mean(np.maximum(ST - K, 0.0))), "call")
+            for K in K_list]
+
+
+def test_rbergomi_rho_controls_skew_and_correlation():
+    T = 0.5
+    skews, corrs = {}, {}
+    for rho in (-0.9, 0.0, 0.9):
+        t, S, v = rbergomi_paths(100.0, T, 64, 20000, 0.1, 1.9, rho, 0.04, seed=11)
+        iv90, iv110 = _smile(S, (90.0, 110.0), T)
+        skews[rho] = iv90 - iv110
+        dlogS = np.diff(np.log(S), axis=1).ravel()
+        dlogv = np.diff(np.log(v), axis=1).ravel()
+        corrs[rho] = np.corrcoef(dlogS, dlogv)[0, 1]
+    assert skews[-0.9] > 0.05 and skews[0.9] < -0.05 and abs(skews[0.0]) < 0.02
+    # same-step corr is about rho * 0.42 here (old fBM driver: 0.004 for any rho)
+    assert corrs[-0.9] < -0.25 and corrs[0.9] > 0.25 and abs(corrs[0.0]) < 0.02
+
+
+def test_rbergomi_hybrid_forward_variance_and_volterra_variance():
+    H, eta, xi0, T, N = 0.1, 1.0, 0.04, 0.5, 64
+    t, S, v = rbergomi_paths(100.0, T, N, 40000, H, eta, -0.7, xi0, seed=5)
+    for k in (8, 32, 64):
+        assert abs(v[:, k].mean() / xi0 - 1.0) < 0.03
+        W = (np.log(v[:, k] / xi0) + 0.5 * eta ** 2 * t[k] ** (2 * H)) / eta
+        assert abs(np.var(W) / t[k] ** (2 * H) - 1.0) < 0.03
+
+
+@pytest.mark.parametrize("method", ["davies-harte", "hosking"])
+def test_legacy_fbm_drivers_reject_correlation(method):
+    with pytest.raises(ValueError):
+        rbergomi_paths(100.0, 0.5, 16, 10, 0.1, 1.5, -0.5, 0.04, seed=0, fgn_method=method)
+    rbergomi_paths(100.0, 0.5, 16, 10, 0.1, 1.5, 0.0, 0.04, seed=0, fgn_method=method)
+
+
+def _rbergomi_cholesky_calls(Ks, T, N, H, eta, rho, xi0, n_paths, seed):
+    """Exact joint simulation of (W~_{t_i}, W_{t_i}) by Cholesky; same log-Euler spot step."""
+    a = H - 0.5
+    t = np.linspace(0.0, T, N + 1)[1:]
+    C = np.zeros((2 * N, 2 * N))
+    for i, u in enumerate(t):
+        for j, w in enumerate(t):
+            m = min(u, w)
+            if i == j:
+                C[i, j] = u ** (2 * H)
+            elif u < w:
+                C[i, j] = 2 * H * quad(lambda s: (w - s) ** a, 0, u, weight="alg", wvar=(0, a))[0]
+            else:
+                C[i, j] = 2 * H * quad(lambda s: (u - s) ** a, 0, w, weight="alg", wvar=(0, a))[0]
+            C[i, N + j] = C[N + j, i] = math.sqrt(2 * H) / (a + 1) * (u ** (a + 1) - (u - m) ** (a + 1))
+            C[N + i, N + j] = m
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n_paths, 2 * N)) @ np.linalg.cholesky(C).T
+    Y = np.hstack([np.zeros((n_paths, 1)), X[:, :N]])
+    dW = np.diff(np.hstack([np.zeros((n_paths, 1)), X[:, N:]]), axis=1)
+    tg = np.concatenate([[0.0], t])
+    v = xi0 * np.exp(eta * Y - 0.5 * eta ** 2 * tg ** (2 * H))
+    dt = T / N
+    dB = rho * dW + math.sqrt(1 - rho * rho) * rng.standard_normal((n_paths, N)) * math.sqrt(dt)
+    ST = 100.0 * np.exp(np.sum(np.sqrt(v[:, :-1]) * dB - 0.5 * v[:, :-1] * dt, axis=1))
+    pays = [np.maximum(ST - K, 0.0) for K in Ks]
+    return [p.mean() for p in pays], [p.std() / math.sqrt(n_paths) for p in pays]
+
+
+def test_rbergomi_matches_exact_cholesky_simulation():
+    # Independent reference: exact Gaussian simulation of the Volterra process
+    # jointly with its driving Brownian motion (small grid).
+    T, N, H, eta, rho, xi0, n = 0.5, 32, 0.1, 1.9, -0.9, 0.04, 200_000
+    Ks = (80.0, 100.0, 120.0)
+    ref, ref_se = _rbergomi_cholesky_calls(Ks, T, N, H, eta, rho, xi0, n, seed=1)
+    t, S, v = rbergomi_paths(100.0, T, N, n, H, eta, rho, xi0, seed=2)
+    for K, m, se in zip(Ks, ref, ref_se):
+        pay = np.maximum(S[:, -1] - K, 0.0)
+        mc, mc_se = pay.mean(), pay.std() / math.sqrt(n)
+        assert abs(mc - m) < 4.0 * math.hypot(se, mc_se), f"K={K}: {mc:.4f} vs exact {m:.4f}"
+
+
+def test_xi0_short_array_is_padded_with_last_value():
+    from src.rough import _xi0_as_callable
+    t = np.linspace(0.0, 1.0, 5)
+    f = _xi0_as_callable([0.04, 0.09])
+    assert np.allclose(f(t), [0.04, 0.09, 0.09, 0.09, 0.09])
+    g = _xi0_as_callable([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07])
+    assert np.allclose(g(t), [0.01, 0.02, 0.03, 0.04, 0.05])
+
+
+def test_importing_rough_does_not_modify_environment():
+    import os, subprocess, sys, json
+    code = ("import os, json; before = dict(os.environ); import src.rough; "
+            "print(json.dumps({k: os.environ.get(k) for k in set(os.environ) ^ set(before)}))")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == {}
+
+
+# Regression: the hybrid driver's 2x2 Cholesky factor is singular at H = 1/2,
+# where np.linalg.cholesky raised LinAlgError (main priced H = 0.5).
+from src.rough import volterra_hybrid
+
+
+def test_hybrid_driver_handles_h_one_half():
+    N, T = 100, 1.0
+    dt = T / N
+    Y, dW, var_Y = volterra_hybrid(N, 0.5, dt, 2000, np.random.default_rng(7))
+    # H = 1/2: the Riemann-Liouville process is Brownian motion itself
+    assert np.allclose(Y[:, 1:], np.cumsum(dW, axis=1), atol=1e-12)
+    assert np.allclose(var_Y, np.arange(N + 1) * dt, rtol=1e-12, atol=1e-15)
+
+    xi0 = 0.04
+    c, se = rbergomi_euro_mc(S0=100.0, K=100.0, T=T, r=0.0, q=0.0, H=0.5, eta=1e-12,
+                             rho=0.0, xi0=xi0, n_paths=20000, N=N, option="call", seed=1)
+    c_bs = black_scholes_price(100.0, 100.0, T, 0.0, math.sqrt(xi0), option_type="call")
+    assert abs(c - c_bs) < 3.0 * se
+
+
+@pytest.mark.parametrize("H", [0.1, 0.3, 0.7])
+def test_hybrid_closed_form_factor_matches_numpy_cholesky(H):
+    N, dt = 16, 0.5 / 16
+    a = H - 0.5
+    C = np.array([[dt, dt ** (a + 1) / (a + 1)],
+                  [dt ** (a + 1) / (a + 1), dt ** (2 * a + 1) / (2 * a + 1)]])
+    Z = np.random.default_rng(3).standard_normal((50, N, 2)) @ np.linalg.cholesky(C).T
+    Y, dW, _ = volterra_hybrid(N, H, dt, 50, np.random.default_rng(3))
+    assert np.allclose(dW, Z[:, :, 0], rtol=0, atol=1e-13)
+    assert np.allclose(Y[:, 1], math.sqrt(2 * H) * Z[:, 0, 1], rtol=0, atol=1e-12)
