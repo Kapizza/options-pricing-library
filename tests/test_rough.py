@@ -446,3 +446,35 @@ def test_importing_rough_does_not_modify_environment():
                          cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout.strip().splitlines()[-1]) == {}
+
+
+# Regression: the hybrid driver's 2x2 Cholesky factor is singular at H = 1/2,
+# where np.linalg.cholesky raised LinAlgError (main priced H = 0.5).
+from src.rough import volterra_hybrid
+
+
+def test_hybrid_driver_handles_h_one_half():
+    N, T = 100, 1.0
+    dt = T / N
+    Y, dW, var_Y = volterra_hybrid(N, 0.5, dt, 2000, np.random.default_rng(7))
+    # H = 1/2: the Riemann-Liouville process is Brownian motion itself
+    assert np.allclose(Y[:, 1:], np.cumsum(dW, axis=1), atol=1e-12)
+    assert np.allclose(var_Y, np.arange(N + 1) * dt, rtol=1e-12, atol=1e-15)
+
+    xi0 = 0.04
+    c, se = rbergomi_euro_mc(S0=100.0, K=100.0, T=T, r=0.0, q=0.0, H=0.5, eta=1e-12,
+                             rho=0.0, xi0=xi0, n_paths=20000, N=N, option="call", seed=1)
+    c_bs = black_scholes_price(100.0, 100.0, T, 0.0, math.sqrt(xi0), option_type="call")
+    assert abs(c - c_bs) < 3.0 * se
+
+
+@pytest.mark.parametrize("H", [0.1, 0.3, 0.7])
+def test_hybrid_closed_form_factor_matches_numpy_cholesky(H):
+    N, dt = 16, 0.5 / 16
+    a = H - 0.5
+    C = np.array([[dt, dt ** (a + 1) / (a + 1)],
+                  [dt ** (a + 1) / (a + 1), dt ** (2 * a + 1) / (2 * a + 1)]])
+    Z = np.random.default_rng(3).standard_normal((50, N, 2)) @ np.linalg.cholesky(C).T
+    Y, dW, _ = volterra_hybrid(N, H, dt, 50, np.random.default_rng(3))
+    assert np.allclose(dW, Z[:, :, 0], rtol=0, atol=1e-13)
+    assert np.allclose(Y[:, 1], math.sqrt(2 * H) * Z[:, 0, 1], rtol=0, atol=1e-12)

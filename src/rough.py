@@ -252,10 +252,12 @@ def volterra_hybrid(N, H, dt, n_paths, rng):
     """
     N = int(N); n_paths = int(n_paths)
     a = float(H) - 0.5
-    # joint law of (dW_i, int_{t_i}^{t_{i+1}} (t_{i+1}-s)^a dW_s)
-    C = np.array([[dt, dt ** (a + 1.0) / (a + 1.0)],
-                  [dt ** (a + 1.0) / (a + 1.0), dt ** (2.0 * a + 1.0) / (2.0 * a + 1.0)]])
-    L = np.linalg.cholesky(C)
+    # joint law of (dW_i, int_{t_i}^{t_{i+1}} (t_{i+1}-s)^a dW_s): covariance
+    # [[dt, dt^(a+1)/(a+1)], [., dt^(2a+1)/(2a+1)]], whose closed-form Cholesky
+    # factor stays valid at H = 1/2 (a = 0), where the matrix is singular
+    s = dt ** (a + 0.5)
+    L = np.array([[math.sqrt(dt), 0.0],
+                  [s / (a + 1.0), s * abs(a) / ((a + 1.0) * math.sqrt(2.0 * a + 1.0))]])
     Z = rng.standard_normal((n_paths, N, 2)) @ L.T
     dW, dW_near = Z[:, :, 0], Z[:, :, 1]
 
