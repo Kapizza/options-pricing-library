@@ -33,6 +33,11 @@ For background on the Central Limit Theorem (CLT), Brownian Motion, Ito's Lemma,
   - Rough models (Monte Carlo, parallelizable): rBergomi with a Riemann–Liouville driver
     simulated by the hybrid scheme (spot-vol correlation included), and rough Heston
     (Volterra Euler scheme)
+  - Rough Heston semi-analytic pricer (`src/rough_heston_fourier.py`): characteristic function
+    from the fractional Riccati equation (El Euch & Rosenbaum) and COS pricing; reduces to Heston
+    at H = 1/2. `calibrate_rough_heston_fourier` calibrates with it and recovers known parameters;
+    the Monte Carlo `calibrate_rough_heston` does not converge reliably (noisy objective, and
+    Euler bias at high vol-of-vol)
 
 - SVI volatility surfaces
   - Raw-SVI per-expiry fits; butterfly arbitrage (Gatheral–Jacquier
