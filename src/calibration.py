@@ -30,6 +30,7 @@ from src.rough import (
     rough_heston_euro_mc,
 )
 from src.heston import heston_smile_prices
+from src.rough_heston_fourier import rough_heston_smile_prices
 
 _VEGA_WEIGHT_SCHEME = "v3_floor0.25_cap4_normmean_wing0.35_p1"
 # Part of the calibration cache key: bump whenever model numerics change so that
@@ -729,6 +730,112 @@ def calibrate_rough_heston(
 
     p = best.x
     out = dict(v0=p[0], kappa=p[1], theta=p[2], eta=p[3], rho=p[4], H=p[5],
+               obj=best.fun, success=best.success, nit=best.nit, history=best_hist)
+    return out, best
+
+
+def _rough_heston_fourier_sse(sm, params, metric, weights, num):
+    (S0, r, q, T, strikes, mids, cp, mkt_iv) = sm
+    v0, kappa, theta, eta, rho, H = params
+    try:
+        model_px = rough_heston_smile_prices(
+            S0, r, q, T, strikes, kappa=kappa, theta=theta, eta=eta, v0=v0, rho=rho, H=H,
+            N=int(num.get("cos_N", 512)), L=float(num.get("cos_L", 12.0)),
+            n_steps=int(num.get("n_steps", 200)), option=cp,
+        )
+    except (ValueError, FloatingPointError):
+        return math.inf
+    w = None if weights is None else weights.get(T)
+    if metric == "price":
+        resid = model_px - mids
+    else:
+        mod_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, model_px)])
+        resid = mod_iv - mkt_iv
+    if w is not None:
+        resid = resid * np.asarray(w, float)
+    resid = resid[np.isfinite(resid)]
+    if resid.size == 0:
+        return math.inf
+    return float(resid @ resid)
+
+
+def calibrate_rough_heston_fourier(
+    smiles: List[Tuple],
+    metric: str = "iv",
+    vega_weight: bool = True,
+    bounds=((1e-4, 0.5), (0.05, 8.0), (1e-4, 0.5), (0.05, 3.0), (-0.999, -0.01), (0.02, 0.5)),
+    x0=(0.04, 1.5, 0.04, 0.5, -0.6, 0.15),
+    numerics=dict(cos_N=512, cos_L=12.0, n_steps=200),
+    options=None,
+    multistart: int = 2,
+    verbose: bool = True,
+    print_every: int = 1,
+):
+    """
+    Calibrate rough Heston (v0, kappa, theta, eta, rho, H) with the
+    semi-analytic Fourier pricer (src.rough_heston_fourier), to one or more
+    smiles given as (S0, r, q, T, strikes, mids, cp).
+
+    Unlike calibrate_rough_heston, which prices by Monte Carlo through an Euler
+    scheme with a variance floor (a noisy objective, and biased prices at high
+    vol-of-vol), the objective here is deterministic and smooth in the
+    parameters, so L-BFGS-B with SciPy's default finite-difference step
+    converges. Several maturities are needed to identify all six parameters.
+    Returns (dict(v0, kappa, theta, eta, rho, H, obj, success, nit, history), res).
+    """
+    dat = []
+    for (S0, r, q, T, strikes, mids, cp) in smiles:
+        strikes = np.asarray(strikes, float)
+        mids = np.asarray(mids, float)
+        mkt_iv = None
+        if metric == "iv":
+            mkt_iv = np.array([_implied_vol(S0, K, T, r, q, p, cp) for K, p in zip(strikes, mids)])
+        dat.append((S0, r, q, T, strikes, mids, cp, mkt_iv))
+
+    weights = None
+    if vega_weight and metric == "iv":
+        weights = {}
+        for (S0, r, q, T, strikes, mids, cp, mkt_iv) in dat:
+            w = _vega_weight_array(S0, r, q, T, strikes, mkt_iv)
+            if w is not None:
+                weights[T] = w
+
+    def objective(x):
+        v0, kappa, theta, eta, rho, H = (float(t) for t in x)
+        if v0 <= 0 or theta <= 0 or eta <= 0 or kappa <= 0 or not (-1.0 < rho < 1.0) or not (0.0 < H <= 0.5):
+            return 1e6
+        err2 = 0.0
+        for sm in dat:
+            e = _rough_heston_fourier_sse(sm, (v0, kappa, theta, eta, rho, H), metric, weights, numerics)
+            if not np.isfinite(e):
+                return 1e6
+            err2 += e
+        return err2
+
+    b = Bounds([lo for lo, _ in bounds], [hi for _, hi in bounds])
+    rng = np.random.default_rng(4207)
+    starts = [np.clip(np.array(x0, dtype=float), b.lb, b.ub)]
+    for _ in range(max(0, multistart - 1)):
+        noise = np.array([0.2, 0.2, 0.2, 0.25, 0.05, 0.2]) * (rng.random(6) - 0.5)
+        starts.append(np.clip(starts[0] * (1.0 + noise), b.lb, b.ub))
+
+    best, best_hist = None, None
+    for i, guess in enumerate(starts, 1):
+        mon = _CalibMonitor(tag=f"rough Heston (Fourier) #{i}", print_every=print_every, verbose=verbose)
+        obj_wrapped = mon.wrap_obj(objective)
+        mon.start(start_idx=i)
+        # The objective is deterministic, so tight tolerances are meaningful;
+        # SciPy's default ftol stops at relative errors around 1e-7 here.
+        _opt = {"maxiter": 500, "ftol": 1e-15, "gtol": 1e-10}
+        if options:
+            _opt.update(options)
+        res = minimize(obj_wrapped, x0=guess, method="L-BFGS-B", bounds=b, options=_opt, callback=mon.cb)
+        mon.done(label="best")
+        res.history = mon.history
+        if best is None or res.fun < best.fun:
+            best, best_hist = res, mon.history
+
+    out = dict(v0=best.x[0], kappa=best.x[1], theta=best.x[2], eta=best.x[3], rho=best.x[4], H=best.x[5],
                obj=best.fun, success=best.success, nit=best.nit, history=best_hist)
     return out, best
 

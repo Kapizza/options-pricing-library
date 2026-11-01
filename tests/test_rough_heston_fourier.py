@@ -65,3 +65,20 @@ def test_matches_monte_carlo_at_low_vol_of_vol():
     c, se = pay.mean(axis=0), pay.std(axis=0, ddof=1) / np.sqrt(pay.shape[0])
     assert np.all(np.abs(c - fourier) < 3.0 * se)
 
+
+def test_fourier_calibration_recovers_parameters_from_far_start():
+    from src.calibration import calibrate_rough_heston_fourier
+    truth = dict(v0=0.05, kappa=1.5, theta=0.04, eta=0.5, rho=-0.7, H=0.1)
+    num = dict(cos_N=256, cos_L=12.0, n_steps=100)
+    smiles = []
+    for T in (0.1, 0.5, 2.0):
+        KK = 100.0 * np.exp(np.linspace(-0.25, 0.2, 7) * np.sqrt(T / 0.5))
+        mids = rough_heston_smile_prices(100.0, 0.02, 0.01, T, KK, N=256, n_steps=100, **truth)
+        smiles.append((100.0, 0.02, 0.01, T, KK, mids, "call"))
+    # start outside every tolerance of the Monte Carlo recovery test
+    best, _ = calibrate_rough_heston_fourier(
+        smiles, metric="price", vega_weight=False, x0=(0.03, 0.8, 0.06, 1.0, -0.4, 0.3),
+        numerics=num, multistart=1, verbose=False)
+    assert best["obj"] < 1e-10
+    for k, v in truth.items():
+        assert abs(best[k] - v) < 1e-3 * max(1.0, abs(v)), k
